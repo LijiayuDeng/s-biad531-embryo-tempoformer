@@ -1,0 +1,11 @@
+runs/
+processed*/
+*.pt
+*.pth
+*.npy
+*.tif
+*.tiff
+*.log
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store

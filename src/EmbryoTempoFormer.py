@@ -1,0 +1,1724 @@
+# -*- coding: utf-8 -*-
+"""
+EmbryoTempoFormer_RouteA (full, working)
+
+Key memory fixes (what you were missing):
+- ckpt_frame: checkpoint WHOLE frame encoder per chunk (solves 24-frame graph accumulation OOM)
+- frame_chunk: microbatch frames into CNN
+- ckpt_cnn: optional checkpoint inside CNN blocks (usually off when ckpt_frame=True to avoid nested overhead)
+
+CLI commands kept: preprocess / make_split / train / eval / infer
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import csv
+import json
+import math
+import time
+import random
+import argparse
+import dataclasses
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DataLoader, get_worker_info
+from torch.utils.data.distributed import DistributedSampler
+from torch.utils.checkpoint import checkpoint, checkpoint_sequential
+
+try:
+    import tifffile
+except Exception:
+    tifffile = None
+
+try:
+    from PIL import Image
+except Exception:
+    Image = None
+
+try:
+    import torchvision.transforms.functional as TVF
+except Exception:
+    TVF = None
+
+MODEL_NAME = "EmbryoTempoFormer_RouteA"
+
+# time label (hours post fertilization)
+T0_HPF = 4.5
+DT_H = 0.25
+
+EXPECT_T_DEFAULT = 192
+DEFAULT_CLIP_LEN = 24
+
+EXCLUDE_KEYS = {
+    "FishDev_WT_01_1-A3","FishDev_WT_01_1-B3","FishDev_WT_01_1-C3","FishDev_WT_01_1-D3",
+    "FishDev_WT_01_1-E3","FishDev_WT_01_1-F3","FishDev_WT_01_1-G3","FishDev_WT_01_1-H3",
+    "FishDev_WT_02_1-A1","FishDev_WT_02_1-B1","FishDev_WT_02_1-C1","FishDev_WT_02_1-D1",
+    "FishDev_WT_02_1-E1","FishDev_WT_02_1-F1","FishDev_WT_02_1-G1","FishDev_WT_02_1-H1",
+    "FishDev_WT_03_1-A2","FishDev_WT_03_1-B2","FishDev_WT_03_1-C2","FishDev_WT_03_1-D2",
+    "FishDev_WT_03_1-E2","FishDev_WT_03_1-F2","FishDev_WT_03_1-G2","FishDev_WT_03_1-H2",
+    "FishDev_WT_04_1-A2","FishDev_WT_04_1-B2","FishDev_WT_04_1-C2","FishDev_WT_04_1-D2",
+    "FishDev_WT_04_1-E2","FishDev_WT_04_1-F2","FishDev_WT_04_1-G2",
+    "FishDev_WT_05_1-A4","FishDev_WT_05_1-B4","FishDev_WT_05_1-C4","FishDev_WT_05_1-D4",
+    "FishDev_WT_05_1-E4","FishDev_WT_05_1-F4","FishDev_WT_05_1-G4","FishDev_WT_05_1-H4",
+}
+
+# One-arg memory control.
+# ultra/lowmem enable ckpt_frame=True (this is the real OOM fix).
+MEM_PROFILES = {
+    "fast":     dict(frame_chunk=16, ckpt_frame=False, ckpt_cnn=False, ckpt_segments=1),
+    "balanced": dict(frame_chunk=8,  ckpt_frame=False, ckpt_cnn=True,  ckpt_segments=2),
+    "lowmem":   dict(frame_chunk=4,  ckpt_frame=True,  ckpt_cnn=False, ckpt_segments=1),
+    "ultra":    dict(frame_chunk=1,  ckpt_frame=True,  ckpt_cnn=False, ckpt_segments=1),
+}
+
+
+# -------------------------
+# Utils
+# -------------------------
+def now_str() -> str:
+    return time.strftime("%Y%m%d-%H%M%S", time.localtime())
+
+
+def jdump(obj: Any, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+
+
+def jload(path: str | Path) -> Any:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def dump_run_config(out_dir: Path, cfg: "TrainConfig") -> None:
+    mp = MEM_PROFILES.get(cfg.mem_profile, MEM_PROFILES["balanced"])
+    aug = AugParams()
+    env = {
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "cudnn": torch.backends.cudnn.version(),
+        "device_count": torch.cuda.device_count(),
+        "gpu0": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+    }
+    payload = {
+        "train_config": dataclasses.asdict(cfg),
+        "mem_profile_detail": mp,
+        "augment": dataclasses.asdict(aug),
+        "env": env,
+    }
+    jdump(payload, out_dir / "run_config.json")
+
+
+def _short_key_from_eid(eid: str) -> str:
+    m = re.search(r"^(?P<prefix>.+?)_MMStack_(?P<well>[A-H]\d{1,2})\b", eid)
+    if m:
+        return f"{m.group('prefix')}-{m.group('well')}"
+    m2 = re.search(r"^(?P<prefix>.+?)_(?P<well>[A-H]\d{1,2})\b", eid)
+    if m2:
+        return f"{m2.group('prefix')}-{m2.group('well')}"
+    return eid
+
+
+def is_excluded(eid: str) -> bool:
+    sk = _short_key_from_eid(eid)
+    return (eid in EXCLUDE_KEYS) or (sk in EXCLUDE_KEYS)
+
+
+def filter_excluded(ids: Sequence[str]) -> List[str]:
+    return [x for x in ids if not is_excluded(x)]
+
+
+def seed_all(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = (torch.initial_seed() + worker_id) % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    info = get_worker_info()
+    if info is not None and hasattr(info.dataset, "reseed"):
+        info.dataset.reseed(int(worker_seed))
+
+
+def ensure_device(device: str) -> torch.device:
+    if device == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device(device)
+
+
+def mae_rmse_np(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    y_true = np.asarray(y_true, dtype=np.float64)
+    y_pred = np.asarray(y_pred, dtype=np.float64)
+    err = y_pred - y_true
+    return {"mae": float(np.mean(np.abs(err))), "rmse": float(np.sqrt(np.mean(err**2)))}
+
+
+def gn_groups(ch: int, max_groups: int = 8) -> int:
+    ch = int(ch)
+    for g in range(min(max_groups, ch), 0, -1):
+        if ch % g == 0:
+            return g
+    return 1
+
+
+def checkpoint_seq(seq: nn.Sequential, segments: int, x: torch.Tensor) -> torch.Tensor:
+    segs = max(1, min(int(segments), len(seq)))
+    try:
+        return checkpoint_sequential(seq, segs, x, use_reentrant=False)
+    except TypeError:
+        return checkpoint_sequential(seq, segs, x)
+
+
+def checkpoint_call(fn, *args):
+    try:
+        return checkpoint(fn, *args, use_reentrant=False)
+    except TypeError:
+        return checkpoint(fn, *args)
+
+
+# -------------------------
+# DDP helpers
+# -------------------------
+def ddp_is_enabled() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def ddp_rank() -> int:
+    return dist.get_rank() if ddp_is_enabled() else 0
+
+
+def ddp_is_main() -> bool:
+    return ddp_rank() == 0
+
+
+def ddp_local_rank() -> int:
+    return int(os.environ.get("LOCAL_RANK", "0"))
+
+
+def ddp_init() -> Tuple[torch.device, bool]:
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        local_rank = ddp_local_rank()
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            dist.init_process_group(backend="nccl")
+            return torch.device("cuda", local_rank), True
+        dist.init_process_group(backend="gloo")
+        return torch.device("cpu"), True
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu"), False
+
+
+@torch.no_grad()
+def ddp_all_reduce_sum_(t: torch.Tensor) -> torch.Tensor:
+    if ddp_is_enabled():
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+    return t
+
+
+@torch.no_grad()
+def ddp_r2_from_stats(sum_y: torch.Tensor, sum_y2: torch.Tensor, sum_err2: torch.Tensor, n: torch.Tensor) -> float:
+    eps = 1e-12
+    n_val = float(n.item())
+    if n_val < 2:
+        return float("nan")
+    mean = sum_y / (n + eps)
+    sst = sum_y2 - (sum_y * mean)
+    if abs(float(sst.item())) < 1e-12:
+        return float("nan")
+    return float((1.0 - (sum_err2 / (sst + eps))).item())
+
+
+# -------------------------
+# TIFF I/O + preprocess
+# -------------------------
+def read_tiff_stack(path: str | Path, max_pages: Optional[int] = None) -> np.ndarray:
+    if tifffile is None:
+        raise RuntimeError("tifffile not installed")
+    with tifffile.TiffFile(str(path)) as tf:
+        pages = tf.pages[:max_pages] if max_pages is not None else tf.pages
+        arrs = [p.asarray() for p in pages]
+    if not arrs:
+        raise ValueError(f"Empty TIFF: {path}")
+    s0 = arrs[0].shape
+    for i, a in enumerate(arrs):
+        if a.shape != s0:
+            raise ValueError(f"Inconsistent TIFF pages: {s0} vs {a.shape} at {i}")
+    return np.stack(arrs, axis=0)
+
+
+def percentile_clip_to_u8(arr: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.0) -> Tuple[np.ndarray, Dict[str, float]]:
+    lo = float(np.percentile(arr, p_lo))
+    hi = float(np.percentile(arr, p_hi))
+    if hi <= lo + 1e-12:
+        hi = lo + 1.0
+    x = np.clip(arr.astype(np.float32), lo, hi)
+    x = (x - lo) / (hi - lo + 1e-12)
+    x = np.clip(x, 0.0, 1.0)
+    u8 = (x * 255.0 + 0.5).astype(np.uint8)
+    return u8, {"p_lo": lo, "p_hi": hi}
+
+
+def resize_stack_u8(frames_u8: np.ndarray, img_size: int) -> np.ndarray:
+    if frames_u8.ndim != 3 or frames_u8.dtype != np.uint8:
+        raise ValueError("Expected uint8 [T,H,W]")
+    T, H, W = frames_u8.shape
+    if H == img_size and W == img_size:
+        return frames_u8
+    if Image is None:
+        raise RuntimeError("PIL not installed for resizing")
+    out = []
+    for t in range(T):
+        im = Image.fromarray(frames_u8[t])
+        im = im.resize((img_size, img_size), resample=Image.BILINEAR)
+        out.append(np.asarray(im, dtype=np.uint8))
+    return np.stack(out, axis=0)
+
+
+def pad_or_trim_T(frames_u8: np.ndarray, expect_t: int) -> Tuple[np.ndarray, Dict[str, Any]]:
+    T = int(frames_u8.shape[0])
+    meta = {"orig_T": T, "expect_t": int(expect_t), "action": "none"}
+    if T == expect_t:
+        return frames_u8, meta
+    if T > expect_t:
+        meta["action"] = "trim"
+        return frames_u8[:expect_t], meta
+    meta["action"] = "pad_last"
+    pad = expect_t - T
+    last = frames_u8[-1:]
+    frames2 = np.concatenate([frames_u8, np.repeat(last, pad, axis=0)], axis=0)
+    return frames2, meta
+
+
+def preprocess_stack(raw: np.ndarray, expect_t: int, img_size: int, p_lo: float = 1.0, p_hi: float = 99.0) -> Tuple[np.ndarray, Dict[str, Any]]:
+    u8, clip_meta = percentile_clip_to_u8(raw, p_lo=p_lo, p_hi=p_hi)
+    u8 = resize_stack_u8(u8, img_size=img_size)
+    u8, t_meta = pad_or_trim_T(u8, expect_t=expect_t)
+    return u8, {"clip": clip_meta, "t": t_meta, "img_size": int(img_size)}
+
+
+def save_proc_npy(proc_dir: Path, eid: str, frames_u8: np.ndarray) -> Path:
+    proc_dir.mkdir(parents=True, exist_ok=True)
+    out = proc_dir / f"{eid}.npy"
+    np.save(out, frames_u8, allow_pickle=False)
+    return out
+
+
+def load_frames_memmap(proc_dir: Path, eid: str) -> np.ndarray:
+    path = proc_dir / f"{eid}.npy"
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    return np.load(path, mmap_mode="r")
+
+
+def load_frames_T(proc_dir: Path, eid: str) -> int:
+    return int(load_frames_memmap(proc_dir, eid).shape[0])
+
+
+# -------------------------
+# Augmentations
+# -------------------------
+@dataclass
+class AugParams:
+    p_hflip: float = 0.5
+    p_affine: float = 0.5
+    max_rotate_deg: float = 8.0
+    max_translate: float = 0.03
+    scale_min: float = 0.97
+    scale_max: float = 1.03
+    p_gamma: float = 0.5
+    gamma_min: float = 0.8
+    gamma_max: float = 1.15
+    p_contrast: float = 0.5
+    contrast_min: float = 0.8
+    contrast_max: float = 1.15
+    p_brightness: float = 0.5
+    brightness_min: float = -0.07
+    brightness_max: float = 0.07
+    p_shade: float = 0.25
+    shade_amp: float = 0.20
+    p_noise: float = 0.5
+    noise_sigma: float = 0.02
+    p_blur: float = 0.2
+    blur_ks: Tuple[int, ...] = (3, 5)
+    p_frame_drop: float = 0.10
+    frame_drop_max: int = 2
+
+
+def _apply_box_blur_u8(frame_u8: np.ndarray, k: int) -> np.ndarray:
+    if k <= 1:
+        return frame_u8
+    pad = k // 2
+    x = frame_u8.astype(np.float32)
+    x = np.pad(x, ((pad, pad), (pad, pad)), mode="reflect")
+    H2, W2 = x.shape
+    ii = np.zeros((H2 + 1, W2 + 1), dtype=np.float32)
+    ii[1:, 1:] = np.cumsum(np.cumsum(x, axis=0), axis=1)
+    y = (ii[k:, k:] - ii[:-k, k:] - ii[k:, :-k] + ii[:-k, :-k]) / float(k * k)
+    return np.clip(y, 0, 255).astype(np.uint8)
+
+
+def apply_augment_clip_u8(clip_u8: np.ndarray, rng: np.random.Generator, p: AugParams) -> np.ndarray:
+    out = clip_u8.copy()
+    L, H, W = out.shape
+
+    # frame drop
+    if rng.random() < p.p_frame_drop and p.frame_drop_max > 0:
+        n_drop = int(rng.integers(1, p.frame_drop_max + 1))
+        for _ in range(n_drop):
+            t = int(rng.integers(1, L))
+            out[t] = out[t - 1]
+
+    # hflip
+    if rng.random() < p.p_hflip:
+        out = out[:, :, ::-1].copy()
+
+    # affine (same params for all frames)
+    if rng.random() < p.p_affine and TVF is not None:
+        angle = float(rng.uniform(-p.max_rotate_deg, p.max_rotate_deg))
+        translate_px = (
+            int(rng.uniform(-p.max_translate, p.max_translate) * W),
+            int(rng.uniform(-p.max_translate, p.max_translate) * H),
+        )
+        scale = float(rng.uniform(p.scale_min, p.scale_max))
+        tmp = []
+        for t in range(L):
+            img = torch.from_numpy(out[t]).unsqueeze(0).float() / 255.0
+            img = TVF.affine(
+                img,
+                angle=angle,
+                translate=list(translate_px),
+                scale=scale,
+                shear=[0.0, 0.0],
+                interpolation=TVF.InterpolationMode.BILINEAR,
+                fill=0.0,
+            )
+            tmp.append((img.clamp(0, 1) * 255.0 + 0.5).to(torch.uint8).squeeze(0).numpy())
+        out = np.stack(tmp, axis=0)
+
+    xf = out.astype(np.float32) / 255.0
+    if rng.random() < p.p_gamma:
+        gamma = float(rng.uniform(p.gamma_min, p.gamma_max))
+        xf = np.clip(xf, 0.0, 1.0) ** gamma
+    if rng.random() < p.p_contrast:
+        c = float(rng.uniform(p.contrast_min, p.contrast_max))
+        m = float(np.mean(xf))
+        xf = (xf - m) * c + m
+    if rng.random() < p.p_brightness:
+        b = float(rng.uniform(p.brightness_min, p.brightness_max))
+        xf = xf + b
+
+    # shade
+    if rng.random() < p.p_shade:
+        grid = rng.normal(loc=0.0, scale=1.0, size=(8, 8)).astype(np.float32)
+        grid = (grid - grid.mean()) / (grid.std() + 1e-6)
+        shade = 1.0 + p.shade_amp * grid
+        if Image is not None:
+            im = Image.fromarray(((shade - shade.min()) / (shade.max() - shade.min() + 1e-6) * 255).astype(np.uint8))
+            im = im.resize((W, H), resample=Image.BILINEAR)
+            shade_u = np.asarray(im, dtype=np.float32) / 255.0
+            shade_u = 0.75 + 0.5 * shade_u
+        else:
+            tile_h = int(np.ceil(H / 8))
+            tile_w = int(np.ceil(W / 8))
+            shade_u = np.kron(shade, np.ones((tile_h, tile_w), dtype=np.float32))[:H, :W]
+            shade_u = np.clip(shade_u, 0.75, 1.25)
+        xf = xf * shade_u[None, :, :]
+
+    # noise
+    if rng.random() < p.p_noise:
+        xf = xf + rng.normal(loc=0.0, scale=p.noise_sigma, size=xf.shape).astype(np.float32)
+
+    xf = np.clip(xf, 0.0, 1.0)
+    out = (xf * 255.0 + 0.5).astype(np.uint8)
+
+    # blur
+    if rng.random() < p.p_blur:
+        k = int(rng.choice(np.array(p.blur_ks)))
+        for t in range(L):
+            out[t] = _apply_box_blur_u8(out[t], k=k)
+
+    return out
+
+
+# -------------------------
+# Datasets
+# -------------------------
+class _LRUCache:
+    def __init__(self, max_items: int = 16):
+        self.max_items = int(max_items)
+        self._data: Dict[str, Any] = {}
+        self._order: List[str] = []
+
+    def get(self, key: str) -> Any | None:
+        if key not in self._data:
+            return None
+        self._order.remove(key)
+        self._order.append(key)
+        return self._data[key]
+
+    def put(self, key: str, value: Any) -> None:
+        if key in self._data:
+            self._data[key] = value
+            self._order.remove(key)
+            self._order.append(key)
+            return
+        self._data[key] = value
+        self._order.append(key)
+        if len(self._order) > self.max_items:
+            old = self._order.pop(0)
+            self._data.pop(old, None)
+
+
+class PairQueueDataset(Dataset):
+    def __init__(
+        self,
+        proc_dir: Path,
+        embryo_ids: Sequence[str],
+        clip_len: int,
+        augment: bool,
+        aug: AugParams,
+        seed: int,
+        samples_per_embryo: int = 32,
+        jitter: int = 2,
+        cache_items: int = 16,
+    ):
+        self.proc_dir = Path(proc_dir)
+        self.embryo_ids = filter_excluded(list(embryo_ids))
+        if not self.embryo_ids:
+            raise ValueError("No embryo ids after filtering.")
+        self.clip_len = int(clip_len)
+        self.augment = bool(augment)
+        self.aug = aug
+        self.samples_per_embryo = int(samples_per_embryo)
+        self.jitter = int(jitter)
+        self._cache = _LRUCache(max_items=cache_items)
+        self.reseed(seed)
+        self._queues: Dict[str, Tuple[int, List[int]]] = {}
+
+    def reseed(self, seed: int) -> None:
+        self.rng = np.random.default_rng(int(seed))
+
+    def __len__(self) -> int:
+        return max(1, len(self.embryo_ids) * self.samples_per_embryo)
+
+    def _load(self, eid: str) -> np.ndarray:
+        cached = self._cache.get(eid)
+        if cached is not None:
+            return cached
+        arr = load_frames_memmap(self.proc_dir, eid)
+        self._cache.put(eid, arr)
+        return arr
+
+    def _get_max_start_real(self, frames_T: int) -> int:
+        return max(0, int(frames_T - self.clip_len))
+
+    def _pop_start(self, eid: str, max_start_real: int) -> int:
+        item = self._queues.get(eid, None)
+        if item is None or item[0] != max_start_real or len(item[1]) == 0:
+            q = list(range(0, max_start_real + 1))
+            self.rng.shuffle(q)
+            self._queues[eid] = (max_start_real, q)
+        return int(self._queues[eid][1].pop())
+
+    def _get_clip(self, frames: np.ndarray, start: int, max_start_real: int) -> np.ndarray:
+        s = int(np.clip(start, 0, max_start_real))
+        clip = np.array(frames[s:s + self.clip_len], dtype=np.uint8, copy=True)
+        if clip.shape[0] != self.clip_len:
+            pad = self.clip_len - clip.shape[0]
+            clip = np.concatenate([clip, np.repeat(clip[-1:], pad, axis=0)], axis=0)
+        return clip
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        eid = self.embryo_ids[idx % len(self.embryo_ids)]
+        frames = self._load(eid)
+        frames_T = int(frames.shape[0])
+        max_start_real = self._get_max_start_real(frames_T)
+
+        s1 = self._pop_start(eid, max_start_real)
+        s2 = self._pop_start(eid, max_start_real)
+        if self.jitter > 0 and max_start_real > 0:
+            s1 = int(np.clip(s1 + int(self.rng.integers(-self.jitter, self.jitter + 1)), 0, max_start_real))
+            s2 = int(np.clip(s2 + int(self.rng.integers(-self.jitter, self.jitter + 1)), 0, max_start_real))
+
+        clip1 = self._get_clip(frames, s1, max_start_real)
+        clip2 = self._get_clip(frames, s2, max_start_real)
+
+        if self.augment:
+            clip1 = apply_augment_clip_u8(clip1, self.rng, self.aug)
+            clip2 = apply_augment_clip_u8(clip2, self.rng, self.aug)
+
+        x1 = torch.from_numpy(np.ascontiguousarray(clip1)).unsqueeze(1).float() / 255.0
+        x2 = torch.from_numpy(np.ascontiguousarray(clip2)).unsqueeze(1).float() / 255.0
+
+        o1 = float(T0_HPF + DT_H * s1)
+        o2 = float(T0_HPF + DT_H * s2)
+
+        return {
+            "eid": eid,
+            "start1": int(s1),
+            "start2": int(s2),
+            "x1": x1,
+            "x2": x2,
+            "offset1": torch.tensor(o1, dtype=torch.float32),
+            "offset2": torch.tensor(o2, dtype=torch.float32),
+        }
+
+
+class DeterministicValDataset(Dataset):
+    def __init__(self, proc_dir: Path, embryo_ids: Sequence[str], clip_len: int):
+        self.proc_dir = Path(proc_dir)
+        self.clip_len = int(clip_len)
+        self.embryo_ids = filter_excluded(list(embryo_ids))
+        self.samples: List[Tuple[str, int]] = []
+        for eid in self.embryo_ids:
+            T = load_frames_T(self.proc_dir, eid)
+            max_start_real = max(0, int(T - self.clip_len))
+            for s in range(0, max_start_real + 1):
+                self.samples.append((eid, s))
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        eid, s = self.samples[idx]
+        frames = load_frames_memmap(self.proc_dir, eid)
+        T = int(frames.shape[0])
+        max_start_real = max(0, int(T - self.clip_len))
+        s = int(np.clip(s, 0, max_start_real))
+
+        clip = np.array(frames[s:s + self.clip_len], dtype=np.uint8, copy=True)
+        if clip.shape[0] != self.clip_len:
+            pad = self.clip_len - clip.shape[0]
+            clip = np.concatenate([clip, np.repeat(clip[-1:], pad, axis=0)], axis=0)
+
+        x = torch.from_numpy(np.ascontiguousarray(clip)).unsqueeze(1).float() / 255.0
+        target = float(T0_HPF + DT_H * s)
+        return {"eid": eid, "start": int(s), "x": x, "target": torch.tensor(target, dtype=torch.float32)}
+
+
+# -------------------------
+# Model
+# -------------------------
+class SEBlock(nn.Module):
+    def __init__(self, channels: int, reduction: int = 4, min_hidden: int = 8):
+        super().__init__()
+        hidden = max(channels // reduction, min_hidden)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Linear(channels, hidden)
+        self.fc2 = nn.Linear(hidden, channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = x.shape
+        w = self.pool(x).view(b, c)
+        w = F.silu(self.fc1(w))
+        w = torch.sigmoid(self.fc2(w)).view(b, c, 1, 1)
+        return x * w
+
+
+class DSConvSEBlock(nn.Module):
+    def __init__(self, c_in: int, c_out: int, stride: int = 1, expand_ratio: int = 2, se_reduction: int = 4):
+        super().__init__()
+        mid = c_in * expand_ratio
+        self.use_res = (stride == 1 and c_in == c_out)
+        self.pw1 = nn.Conv2d(c_in, mid, 1, bias=False)
+        self.gn1 = nn.GroupNorm(gn_groups(mid), mid)
+        self.dw = nn.Conv2d(mid, mid, 3, stride=stride, padding=1, groups=mid, bias=False)
+        self.gn2 = nn.GroupNorm(gn_groups(mid), mid)
+        self.pw2 = nn.Conv2d(mid, c_out, 1, bias=False)
+        self.gn3 = nn.GroupNorm(gn_groups(c_out), c_out)
+        self.se = SEBlock(c_out, reduction=se_reduction)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = F.silu(self.gn1(self.pw1(x)))
+        y = F.silu(self.gn2(self.dw(y)))
+        y = self.gn3(self.pw2(y))
+        y = self.se(y)
+        return (x + y) if self.use_res else y
+
+
+class FrameEncoderLite(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        base: int = 24,
+        expand_ratio: int = 2,
+        se_reduction: int = 4,
+        ckpt_cnn: bool = True,
+        ckpt_segments: int = 2,
+    ):
+        super().__init__()
+        self.ckpt_cnn = bool(ckpt_cnn)
+        self.ckpt_segments = int(ckpt_segments)
+
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, base, 3, stride=2, padding=1, bias=False),
+            nn.GroupNorm(gn_groups(base), base),
+            nn.SiLU(),
+        )
+        self.blocks = nn.Sequential(
+            DSConvSEBlock(base, base, stride=2, expand_ratio=expand_ratio, se_reduction=se_reduction),
+            DSConvSEBlock(base, base * 2, stride=2, expand_ratio=expand_ratio, se_reduction=se_reduction),
+            DSConvSEBlock(base * 2, base * 2, stride=1, expand_ratio=expand_ratio, se_reduction=se_reduction),
+            DSConvSEBlock(base * 2, base * 4, stride=2, expand_ratio=expand_ratio, se_reduction=se_reduction),
+            DSConvSEBlock(base * 4, base * 4, stride=1, expand_ratio=expand_ratio, se_reduction=se_reduction),
+            DSConvSEBlock(base * 4, base * 5, stride=2, expand_ratio=expand_ratio, se_reduction=se_reduction),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.proj = nn.Linear(base * 5, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.stem(x)
+        if self.ckpt_cnn and self.training:
+            x = checkpoint_seq(self.blocks, self.ckpt_segments, x)
+        else:
+            x = self.blocks(x)
+        x = self.pool(x).flatten(1)
+        return self.proj(x)
+
+
+class RoPE1D(nn.Module):
+    def __init__(self, head_dim: int, base: float = 10000.0):
+        super().__init__()
+        if head_dim % 2 != 0:
+            raise ValueError("RoPE requires even head_dim.")
+        self.head_dim = int(head_dim)
+        self.base = float(base)
+
+    def build_cos_sin(self, seq_len: int, device: torch.device, dtype: torch.dtype) -> Tuple[torch.Tensor, torch.Tensor]:
+        half = self.head_dim // 2
+        inv_freq = 1.0 / (self.base ** (torch.arange(0, half, device=device).float() / half))
+        pos = torch.arange(seq_len, device=device).float()
+        ang = torch.outer(pos, inv_freq)  # [L, half]
+        return ang.cos().to(dtype), ang.sin().to(dtype)
+
+    @staticmethod
+    def apply(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+        cos = cos[None, None, :, :]
+        sin = sin[None, None, :, :]
+        y1 = x1 * cos - x2 * sin
+        y2 = x1 * sin + x2 * cos
+        return torch.stack([y1, y2], dim=-1).flatten(-2)
+
+
+class TemporalBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, mlp_ratio: float = 2.0, dropout: float = 0.1, attn_drop: float = 0.0):
+        super().__init__()
+        if d_model % n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
+        head_dim = d_model // n_heads
+        if head_dim % 2 != 0:
+            raise ValueError("head_dim must be even for RoPE")
+        self.n_heads = int(n_heads)
+        self.head_dim = int(head_dim)
+
+        self.norm1 = nn.LayerNorm(d_model)
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        self.drop = nn.Dropout(attn_drop)
+        self.proj_drop = nn.Dropout(dropout)
+
+        self.rope = RoPE1D(head_dim=head_dim)
+
+        self.norm2 = nn.LayerNorm(d_model)
+        hidden = int(d_model * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, d_model),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.shape
+        y = self.norm1(x)
+        q, k, v = self.qkv(y).chunk(3, dim=-1)
+
+        q = q.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
+
+        cos, sin = self.rope.build_cos_sin(L, device=x.device, dtype=x.dtype)
+        q = self.rope.apply(q, cos, sin)
+        k = self.rope.apply(k, cos, sin)
+
+        if hasattr(F, "scaled_dot_product_attention"):
+            a = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.drop.p if self.training else 0.0)
+        else:
+            scale = self.head_dim ** -0.5
+            attn = (q @ k.transpose(-2, -1)) * scale
+            attn = attn.softmax(dim=-1)
+            attn = self.drop(attn)
+            a = attn @ v
+
+        a = a.transpose(1, 2).contiguous().view(B, L, D)
+        a = self.proj_drop(self.out(a))
+
+        x = x + a
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+class TempoFormerRouteA(nn.Module):
+    def __init__(
+        self,
+        d_model: int = 128,
+        depth: int = 4,
+        n_heads: int = 4,
+        mlp_ratio: float = 2.0,
+        dropout: float = 0.1,
+        attn_drop: float = 0.0,
+        temporal_drop_p: float = 0.0,
+        temporal_mode: str = "transformer",  # transformer | meanpool | identity
+        cnn_base: int = 24,
+        cnn_expand: int = 2,
+        cnn_se_reduction: int = 4,
+        frame_chunk: int = 8,
+        ckpt_frame: bool = False,
+        ckpt_cnn: bool = True,
+        ckpt_segments: int = 2,
+    ):
+        super().__init__()
+        self.d_model = int(d_model)
+        self.temporal_drop_p = float(temporal_drop_p)
+        self.temporal_mode = str(temporal_mode)
+        self.frame_chunk = int(frame_chunk)
+        self.ckpt_frame = bool(ckpt_frame)
+
+        self.frame_enc = FrameEncoderLite(
+            d_model=self.d_model,
+            base=int(cnn_base),
+            expand_ratio=int(cnn_expand),
+            se_reduction=int(cnn_se_reduction),
+            ckpt_cnn=bool(ckpt_cnn),
+            ckpt_segments=int(ckpt_segments),
+        )
+
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.d_model))
+        nn.init.trunc_normal_(self.cls_token, std=0.02)
+
+        self.blocks = nn.ModuleList([
+            TemporalBlock(d_model=self.d_model, n_heads=int(n_heads), mlp_ratio=float(mlp_ratio), dropout=float(dropout), attn_drop=float(attn_drop))
+            for _ in range(int(depth))
+        ])
+        self.norm = nn.LayerNorm(self.d_model)
+
+        self.head = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.SiLU(),
+            nn.Dropout(dropout),
+            nn.Linear(self.d_model, 1),
+        )
+
+    def _encode_frames(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, C, H, W = x.shape
+        chunk = self.frame_chunk if self.frame_chunk > 0 else L
+        toks = []
+        for t0 in range(0, L, chunk):
+            t1 = min(L, t0 + chunk)
+            xs = x[:, t0:t1].reshape(B * (t1 - t0), C, H, W)
+            if self.training and self.ckpt_frame:
+                ts = checkpoint_call(self.frame_enc, xs)
+            else:
+                ts = self.frame_enc(xs)
+            toks.append(ts.reshape(B, (t1 - t0), self.d_model))
+        return torch.cat(toks, dim=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.ndim != 5:
+            raise ValueError(f"Expected [B,L,1,H,W], got {x.shape}")
+        B, _, _, _, _ = x.shape
+
+        mode = self.temporal_mode
+        if mode not in ("transformer", "meanpool", "identity"):
+            raise ValueError(f"Unknown temporal_mode={mode}")
+
+        # identity baseline: use only first frame
+        if mode == "identity":
+            x = x[:, :1]
+
+        tok = self._encode_frames(x)  # [B, Ltok, D]
+
+        # temporal token drop (only makes sense if Ltok > 1)
+        if self.training and self.temporal_drop_p > 0 and tok.shape[1] > 1:
+            mask = (torch.rand(B, tok.shape[1], 1, device=tok.device) > self.temporal_drop_p).to(tok.dtype)
+            tok = tok * mask / (1.0 - self.temporal_drop_p)
+
+        if mode == "meanpool":
+            feat = self.norm(tok.mean(dim=1))
+            return self.head(feat).squeeze(-1)
+
+        if mode == "identity":
+            feat = self.norm(tok[:, 0])
+            return self.head(feat).squeeze(-1)
+
+        # transformer (default)
+        cls = self.cls_token.expand(B, -1, -1)
+        h = torch.cat([cls, tok], dim=1)
+        for blk in self.blocks:
+            h = blk(h)
+        h = self.norm(h)
+        return self.head(h[:, 0]).squeeze(-1)
+
+
+# -------------------------
+# EMA
+# -------------------------
+class EMA:
+    def __init__(self, model: nn.Module, decay: float = 0.995):
+        self.decay = float(decay)
+        self.shadow: Dict[str, torch.Tensor] = {}
+        self._init_from(model)
+
+    def _raw(self, model: nn.Module) -> nn.Module:
+        return model.module if hasattr(model, "module") else model
+
+    @torch.no_grad()
+    def _init_from(self, model: nn.Module) -> None:
+        m = self._raw(model)
+        self.shadow = {k: v.detach().clone() for k, v in m.state_dict().items()}
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        m = self._raw(model)
+        sd = m.state_dict()
+        for k, v in sd.items():
+            if k not in self.shadow:
+                self.shadow[k] = v.detach().clone()
+                continue
+            if v.is_floating_point():
+                self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=(1.0 - self.decay))
+            else:
+                self.shadow[k] = v.detach().clone()
+
+    @torch.no_grad()
+    def copy_to(self, model: nn.Module) -> Dict[str, torch.Tensor]:
+        m = self._raw(model)
+        backup = {k: v.detach().clone() for k, v in m.state_dict().items()}
+        m.load_state_dict(self.shadow, strict=True)
+        return backup
+
+    @torch.no_grad()
+    def restore(self, model: nn.Module, backup: Dict[str, torch.Tensor]) -> None:
+        m = self._raw(model)
+        m.load_state_dict(backup, strict=True)
+
+
+# -------------------------
+# Train/Eval
+# -------------------------
+@dataclass
+class TrainConfig:
+    proc_dir: str
+    split_json: str
+    out_dir: str
+
+    clip_len: int = DEFAULT_CLIP_LEN
+    img_size: int = 384
+    expect_t: int = EXPECT_T_DEFAULT
+
+    batch_size: int = 64
+    val_batch_size: int = 64
+    num_workers: int = 8
+    samples_per_embryo: int = 32
+    jitter: int = 2
+    cache_items: int = 16
+
+    epochs: int = 200
+    lr: float = 6e-4
+    weight_decay: float = 0.01
+    warmup_ratio: float = 0.01
+    lr_min_ratio: float = 0.05
+    max_grad_norm: float = 1.0
+    grad_accum: int = 1
+
+    model_dim: int = 128
+    model_depth: int = 4
+    model_heads: int = 4
+    model_mlp_ratio: float = 2.0
+    drop: float = 0.1
+    attn_drop: float = 0.0
+    temporal_drop_p: float = 0.0
+    temporal_mode: str = "transformer"  # transformer|meanpool|identity
+
+    cnn_base: int = 24
+    cnn_expand: int = 2
+    cnn_se_reduction: int = 4
+
+    mem_profile: str = "balanced"
+
+    lambda_abs: float = 1.0
+    lambda_diff: float = 1.0
+    cons_ramp_ratio: float = 0.2
+    abs_loss_type: str = "l1"  # l1 or smoothl1
+
+    amp: bool = True
+    ema_decay: float = 0.0
+    ema_start_ratio: float = 0.1
+    ema_eval: bool = False
+
+    seed: int = 42
+    device: str = "auto"
+    resume: str = ""
+    save_every: int = 1
+    patience: int = 0
+
+
+def build_model(cfg: TrainConfig) -> nn.Module:
+    mp = MEM_PROFILES.get(cfg.mem_profile, MEM_PROFILES["balanced"])
+    return TempoFormerRouteA(
+        d_model=cfg.model_dim,
+        depth=cfg.model_depth,
+        n_heads=cfg.model_heads,
+        mlp_ratio=cfg.model_mlp_ratio,
+        dropout=cfg.drop,
+        attn_drop=cfg.attn_drop,
+        temporal_drop_p=cfg.temporal_drop_p,
+        temporal_mode=cfg.temporal_mode,
+        cnn_base=cfg.cnn_base,
+        cnn_expand=cfg.cnn_expand,
+        cnn_se_reduction=cfg.cnn_se_reduction,
+        frame_chunk=int(mp["frame_chunk"]),
+        ckpt_frame=bool(mp["ckpt_frame"]),
+        ckpt_cnn=bool(mp["ckpt_cnn"]),
+        ckpt_segments=int(mp["ckpt_segments"]),
+    )
+
+
+def build_loaders(cfg: TrainConfig, ddp: bool):
+    sp = jload(cfg.split_json)
+    train_ids = filter_excluded(sp["train"])
+    val_ids = filter_excluded(sp["val"])
+    aug = AugParams()
+
+    ds_train = PairQueueDataset(Path(cfg.proc_dir), train_ids, cfg.clip_len, True, aug, cfg.seed,
+                                cfg.samples_per_embryo, cfg.jitter, cfg.cache_items)
+    ds_val = DeterministicValDataset(Path(cfg.proc_dir), val_ids, cfg.clip_len)
+
+    train_sampler = DistributedSampler(ds_train, shuffle=True) if ddp else None
+    val_sampler = DistributedSampler(ds_val, shuffle=False) if ddp else None
+
+    pin = torch.cuda.is_available()
+    g = torch.Generator()
+    g.manual_seed(cfg.seed)
+
+    dl_train = DataLoader(
+        ds_train,
+        batch_size=cfg.batch_size,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
+        num_workers=cfg.num_workers,
+        pin_memory=pin,
+        drop_last=True,
+        persistent_workers=(cfg.num_workers > 0),
+        prefetch_factor=2 if cfg.num_workers > 0 else None,
+        worker_init_fn=seed_worker,
+        generator=g,
+    )
+    dl_val = DataLoader(
+        ds_val,
+        batch_size=cfg.val_batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=max(0, cfg.num_workers // 2),
+        pin_memory=pin,
+        drop_last=False,
+        persistent_workers=(cfg.num_workers > 0),
+        prefetch_factor=2 if cfg.num_workers > 0 else None,
+        worker_init_fn=seed_worker,
+        generator=g,
+    )
+    return dl_train, dl_val, train_sampler, val_sampler
+
+
+def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, ema, epoch: int, step: int, cfg: TrainConfig, best_mae: float):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = model.module if isinstance(model, DDP) else model
+    state = {
+        "model": raw.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict() if scheduler else None,
+        "scaler": scaler.state_dict() if scaler else None,
+        "ema": (ema.shadow if ema else None),
+        "epoch": int(epoch),
+        "step": int(step),
+        "best_mae": float(best_mae),
+        "cfg": dataclasses.asdict(cfg),
+        "meta": {"model_name": MODEL_NAME, "saved_at": now_str()},
+    }
+    torch.save(state, path)
+
+
+def load_checkpoint(path: str, model, optimizer=None, scheduler=None, scaler=None, ema=None) -> Tuple[int, int, float]:
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    model.load_state_dict(state["model"], strict=True)
+    if optimizer is not None and state.get("optimizer") is not None:
+        optimizer.load_state_dict(state["optimizer"])
+    if scheduler is not None and state.get("scheduler") is not None:
+        scheduler.load_state_dict(state["scheduler"])
+    if scaler is not None and state.get("scaler") is not None:
+        scaler.load_state_dict(state["scaler"])
+    if ema is not None and state.get("ema") is not None:
+        ema.shadow = state["ema"]
+    return int(state.get("epoch", 0)), int(state.get("step", 0)), float(state.get("best_mae", float("inf")))
+
+
+def linear_ramp(step: int, ramp_steps: int) -> float:
+    if ramp_steps <= 0:
+        return 1.0
+    return float(min(1.0, (step + 1) / float(ramp_steps)))
+
+
+def _abs_loss(pred: torch.Tensor, target: torch.Tensor, kind: str) -> torch.Tensor:
+    if kind == "smoothl1":
+        return F.smooth_l1_loss(pred, target)
+    return F.l1_loss(pred, target)
+
+
+def train_one_epoch(
+    model,
+    dl_train,
+    optimizer,
+    scheduler,
+    scaler,
+    ema: Optional[EMA],
+    device: torch.device,
+    ddp: bool,
+    cfg: TrainConfig,
+    epoch: int,
+    train_sampler,
+    global_step: int,
+    total_optim_steps: int,
+) -> Tuple[Dict[str, float], int]:
+    model.train()
+    if train_sampler is not None:
+        train_sampler.set_epoch(epoch)
+
+    sums = torch.zeros(6, device=device)  # [loss, abs, cons, |err|, err^2, n_samples]
+    ramp_steps = int(cfg.cons_ramp_ratio * total_optim_steps)
+
+    autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else None
+
+    optimizer.zero_grad(set_to_none=True)
+    accum = max(1, int(cfg.grad_accum))
+
+    local_iter = 0
+    for batch in dl_train:
+        x1 = batch["x1"].to(device, non_blocking=True)
+        x2 = batch["x2"].to(device, non_blocking=True)
+        t1 = batch["offset1"].to(device, non_blocking=True)
+        t2 = batch["offset2"].to(device, non_blocking=True)
+        s1 = batch["start1"].to(device, non_blocking=True).float()
+        s2 = batch["start2"].to(device, non_blocking=True).float()
+
+        if cfg.amp and device.type == "cuda":
+            x1 = x1.half()
+            x2 = x2.half()
+
+        B = x1.shape[0]
+
+        if autocast_ctx is not None:
+            with autocast_ctx(enabled=(cfg.amp and device.type == "cuda")):
+                p1 = model(x1)
+                p2 = model(x2)
+
+                loss_abs = 0.5 * (_abs_loss(p1, t1, cfg.abs_loss_type) + _abs_loss(p2, t2, cfg.abs_loss_type))
+                loss_cons = F.smooth_l1_loss(p2 - p1, DT_H * (s2 - s1))
+                ramp = linear_ramp(global_step, ramp_steps)
+                loss = cfg.lambda_abs * loss_abs + cfg.lambda_diff * (ramp * loss_cons)
+
+                loss_scaled = loss / float(accum)
+        else:
+            p1 = model(x1)
+            p2 = model(x2)
+            loss_abs = 0.5 * (_abs_loss(p1, t1, cfg.abs_loss_type) + _abs_loss(p2, t2, cfg.abs_loss_type))
+            loss_cons = F.smooth_l1_loss(p2 - p1, DT_H * (s2 - s1))
+            ramp = linear_ramp(global_step, ramp_steps)
+            loss = cfg.lambda_abs * loss_abs + cfg.lambda_diff * (ramp * loss_cons)
+            loss_scaled = loss / float(accum)
+
+        if scaler is not None and scaler.is_enabled():
+            scaler.scale(loss_scaled).backward()
+        else:
+            loss_scaled.backward()
+
+        local_iter += 1
+        do_step = (local_iter % accum == 0)
+
+        if do_step:
+            if scaler is not None and scaler.is_enabled():
+                scaler.unscale_(optimizer)
+            if cfg.max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.max_grad_norm)
+
+            stepped = True
+            if scaler is not None and scaler.is_enabled():
+                scale_before = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                stepped = (scaler.get_scale() >= scale_before)
+            else:
+                optimizer.step()
+
+            optimizer.zero_grad(set_to_none=True)
+
+            if stepped and scheduler is not None:
+                scheduler.step()
+
+            if ema is not None:
+                if total_optim_steps > 0 and (global_step / float(total_optim_steps)) >= float(cfg.ema_start_ratio):
+                    ema.update(model)
+
+            global_step += 1
+
+        with torch.no_grad():
+            err1 = (p1 - t1)
+            err2 = (p2 - t2)
+            n = 2 * B
+            sums[0] += loss.detach() * B
+            sums[1] += loss_abs.detach() * B
+            sums[2] += loss_cons.detach() * B
+            sums[3] += err1.abs().sum() + err2.abs().sum()
+            sums[4] += (err1**2).sum() + (err2**2).sum()
+            sums[5] += float(n)
+
+    if ddp:
+        ddp_all_reduce_sum_(sums)
+
+    n = float(sums[5].item())
+    metrics = {
+        "loss": float((sums[0] / (n / 2.0)).item()),
+        "abs": float((sums[1] / (n / 2.0)).item()),
+        "cons": float((sums[2] / (n / 2.0)).item()),
+        "mae": float((sums[3] / n).item()),
+        "rmse": float((sums[4] / n).sqrt().item()),
+    }
+    return metrics, global_step
+
+
+@torch.no_grad()
+def validate(model, dl_val, device: torch.device, ddp: bool, cfg: TrainConfig) -> Dict[str, float]:
+    model.eval()
+    sums = torch.zeros(4, device=device)  # [loss, |err|, err^2, n]
+    r2_sums = torch.zeros(4, device=device)  # sum_y, sum_y2, sum_err2, n
+
+    autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else None
+
+    for batch in dl_val:
+        x = batch["x"].to(device, non_blocking=True)
+        y = batch["target"].to(device, non_blocking=True)
+
+        if cfg.amp and device.type == "cuda":
+            x = x.half()
+
+        if autocast_ctx is not None:
+            with autocast_ctx(enabled=(cfg.amp and device.type == "cuda")):
+                p = model(x)
+                loss = F.l1_loss(p, y)
+        else:
+            p = model(x)
+            loss = F.l1_loss(p, y)
+
+        err = p - y
+        B = x.shape[0]
+        sums[0] += loss * B
+        sums[1] += err.abs().sum()
+        sums[2] += (err**2).sum()
+        sums[3] += float(B)
+
+        r2_sums[0] += y.sum()
+        r2_sums[1] += (y**2).sum()
+        r2_sums[2] += (err**2).sum()
+        r2_sums[3] += float(B)
+
+    if ddp:
+        ddp_all_reduce_sum_(sums)
+        ddp_all_reduce_sum_(r2_sums)
+
+    n = float(sums[3].item())
+    metrics = {
+        "loss": float((sums[0] / max(1.0, n)).item()),
+        "mae": float((sums[1] / max(1.0, n)).item()),
+        "rmse": float((sums[2] / max(1.0, n)).sqrt().item()),
+        "r2": ddp_r2_from_stats(r2_sums[0], r2_sums[1], r2_sums[2], r2_sums[3]),
+    }
+    return metrics
+
+
+def _trainconfig_from_ckpt_cfg(
+    ck_cfg: Dict[str, Any],
+    overrides: Dict[str, Any],
+) -> TrainConfig:
+    # keep only known fields
+    fields = set(TrainConfig.__dataclass_fields__.keys())
+    base = {k: ck_cfg[k] for k in ck_cfg.keys() if k in fields}
+    base.update(overrides)
+    return TrainConfig(**base)
+
+
+def cmd_train(args):
+    cfg = TrainConfig(
+        proc_dir=args.proc_dir, split_json=args.split_json, out_dir=args.out_dir,
+        clip_len=args.clip_len, img_size=args.img_size, expect_t=args.expect_t,
+        batch_size=args.batch_size, val_batch_size=args.val_batch_size, num_workers=args.num_workers,
+        samples_per_embryo=args.samples_per_embryo, jitter=args.jitter, cache_items=args.cache_items,
+        epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, warmup_ratio=args.warmup_ratio,
+        lr_min_ratio=args.lr_min_ratio, max_grad_norm=args.max_grad_norm, grad_accum=args.grad_accum,
+        model_dim=args.model_dim, model_depth=args.model_depth, model_heads=args.model_heads,
+        model_mlp_ratio=args.model_mlp_ratio, drop=args.drop, attn_drop=args.attn_drop, temporal_drop_p=args.temporal_drop_p,
+        temporal_mode=args.temporal_mode,
+        cnn_base=args.cnn_base, cnn_expand=args.cnn_expand, cnn_se_reduction=args.cnn_se_reduction,
+        mem_profile=args.mem_profile,
+        lambda_abs=args.lambda_abs, lambda_diff=args.lambda_diff, cons_ramp_ratio=args.cons_ramp_ratio, abs_loss_type=args.abs_loss_type,
+        amp=args.amp, ema_decay=args.ema_decay, ema_start_ratio=args.ema_start_ratio, ema_eval=args.ema_eval,
+        seed=args.seed, device=args.device, resume=args.resume, save_every=args.save_every, patience=args.patience
+    )
+
+    device, ddp = ddp_init()
+
+    if device.type == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
+
+    seed_all(cfg.seed + ddp_rank())
+
+    model = build_model(cfg).to(device)
+    if ddp:
+        model = DDP(model, device_ids=[device.index] if device.type == "cuda" else None, find_unused_parameters=(cfg.temporal_mode != "transformer"))
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+
+    dl_train, dl_val, train_sampler, _ = build_loaders(cfg, ddp=ddp)
+
+    steps_per_epoch = max(1, math.ceil(len(dl_train) / max(1, int(cfg.grad_accum))))
+    total_optim_steps = max(1, cfg.epochs * steps_per_epoch)
+    warmup_steps = min(max(1, int(cfg.warmup_ratio * total_optim_steps)), total_optim_steps)
+
+    def lr_lambda(step: int):
+        if step < warmup_steps:
+            return (step + 1) / float(warmup_steps)
+        if total_optim_steps == warmup_steps:
+            return cfg.lr_min_ratio
+        t = (step - warmup_steps) / max(1, total_optim_steps - warmup_steps)
+        cosine = 0.5 * (1 + math.cos(math.pi * t))
+        return cfg.lr_min_ratio + (1 - cfg.lr_min_ratio) * cosine
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    scaler = torch.cuda.amp.GradScaler(enabled=(cfg.amp and device.type == "cuda"))
+
+    ema = None
+    if cfg.ema_decay and cfg.ema_decay > 0:
+        raw = model.module if isinstance(model, DDP) else model
+        ema = EMA(raw, decay=cfg.ema_decay)
+
+    out_dir = Path(cfg.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ckpt_dir = out_dir / "ckpt"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    hist_path = out_dir / "history.csv"
+
+    if ddp_is_main():
+        dump_run_config(out_dir, cfg)
+
+    start_epoch = 0
+    global_step = 0
+    best_mae = float("inf")
+    if cfg.resume:
+        raw = model.module if isinstance(model, DDP) else model
+        se, ss, bm = load_checkpoint(cfg.resume, raw, optimizer, scheduler, scaler, ema)
+        start_epoch = se + 1
+        global_step = ss
+        best_mae = bm
+        if ddp_is_main():
+            print(f"[resume] epoch={start_epoch} global_step={global_step} best_mae={best_mae:.6f}")
+
+    if ddp_is_main() and not hist_path.exists():
+        with open(hist_path, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerow([
+                "epoch", "step",
+                "train_loss", "train_mae", "train_rmse", "train_abs", "train_cons",
+                "val_loss", "val_mae", "val_rmse", "val_r2",
+                "lr", "secs", "mem_profile", "gpu_mem_gb_rank0"
+            ])
+
+    for epoch in range(start_epoch, cfg.epochs):
+        t0 = time.time()
+        if device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats()
+
+        train_m, global_step = train_one_epoch(
+            model, dl_train, optimizer, scheduler, scaler, ema,
+            device, ddp, cfg, epoch, train_sampler, global_step,
+            total_optim_steps=total_optim_steps,
+        )
+
+        backup = None
+        if ema is not None and cfg.ema_eval:
+            raw = model.module if isinstance(model, DDP) else model
+            backup = ema.copy_to(raw)
+        val_m = validate(model, dl_val, device, ddp, cfg)
+        if backup is not None and ema is not None:
+            raw = model.module if isinstance(model, DDP) else model
+            ema.restore(raw, backup)
+
+        secs = time.time() - t0
+        lr_cur = scheduler.get_last_lr()[0]
+        mem_gb = float(torch.cuda.max_memory_reserved() / (1024**3)) if device.type == "cuda" else float("nan")
+
+        if ddp_is_main():
+            with open(hist_path, "a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([
+                    epoch, global_step,
+                    train_m["loss"], train_m["mae"], train_m["rmse"], train_m["abs"], train_m["cons"],
+                    val_m["loss"], val_m["mae"], val_m["rmse"], val_m["r2"],
+                    lr_cur, secs, cfg.mem_profile, mem_gb
+                ])
+
+            if (epoch + 1) % cfg.save_every == 0:
+                save_checkpoint(ckpt_dir / f"epoch{epoch+1}.pt", model, optimizer, scheduler, scaler, ema, epoch, global_step, cfg, best_mae)
+
+            if val_m["mae"] + 1e-9 < best_mae:
+                best_mae = float(val_m["mae"])
+                save_checkpoint(out_dir / "best.pt", model, optimizer, scheduler, scaler, ema, epoch, global_step, cfg, best_mae)
+
+            print(f"[epoch {epoch}] train_mae={train_m['mae']:.3f} val_mae={val_m['mae']:.3f} lr={lr_cur:.2e} mem={mem_gb:.1f}GB profile={cfg.mem_profile}")
+
+    if ddp_is_main():
+        save_checkpoint(out_dir / "last.pt", model, optimizer, scheduler, scaler, ema, cfg.epochs - 1, global_step, cfg, best_mae)
+
+    if ddp:
+        dist.destroy_process_group()
+
+
+# -------------------------
+# Eval / Infer
+# -------------------------
+def trimmed_mean(x: Sequence[float], trim: float = 0.2) -> float:
+    xs = np.sort(np.asarray(list(x), dtype=np.float64))
+    if xs.size == 0:
+        return float("nan")
+    k = int(trim * xs.size)
+    if 2 * k >= xs.size:
+        return float(np.mean(xs))
+    return float(np.mean(xs[k:-k]))
+
+
+@torch.no_grad()
+def infer_full_embryo_from_proc(
+    model: nn.Module,
+    frames_u8: np.ndarray,
+    device: torch.device,
+    clip_len: int,
+    stride: int = 8,
+    trim: float = 0.2,
+    amp: bool = True,
+) -> Dict[str, Any]:
+    model.eval()
+    T = int(frames_u8.shape[0])
+    starts = list(range(0, max(1, T - clip_len + 1), int(stride)))
+    t0_hats = []
+    autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else None
+    for s in starts:
+        clip = np.asarray(frames_u8[s:s + clip_len], dtype=np.uint8)
+        if clip.shape[0] != clip_len:
+            pad = clip_len - clip.shape[0]
+            clip = np.concatenate([clip, np.repeat(clip[-1:], pad, axis=0)], axis=0)
+        x = torch.from_numpy(np.ascontiguousarray(clip)).unsqueeze(0).unsqueeze(2).float().to(device) / 255.0
+        if amp and device.type == "cuda":
+            x = x.half()
+        if autocast_ctx is not None:
+            with autocast_ctx(enabled=(amp and device.type == "cuda")):
+                offset = float(model(x).item())
+        else:
+            offset = float(model(x).item())
+        t0_hats.append(offset - DT_H * s)
+    t0_final = trimmed_mean(t0_hats, trim=trim)
+    y_pred = t0_final + DT_H * np.arange(T, dtype=np.float64)
+    y_true = T0_HPF + DT_H * np.arange(T, dtype=np.float64)
+    metrics = mae_rmse_np(y_true, y_pred)
+    return {"t0_final": float(t0_final), "starts": starts, "t0_hats": t0_hats, "metrics": metrics}
+
+
+def cmd_eval(args):
+    device = ensure_device(args.device)
+
+    ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    ck_cfg = ck.get("cfg", {}) if isinstance(ck, dict) else {}
+
+    # rebuild model cfg from checkpoint to avoid shape mismatch
+    overrides = dict(
+        proc_dir=args.proc_dir,
+        split_json=args.split_json,
+        out_dir="runs",
+        clip_len=args.clip_len,
+        img_size=args.img_size,
+        expect_t=args.expect_t,
+        batch_size=args.batch_size,
+        val_batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        amp=args.amp,
+        device=args.device,
+        mem_profile=args.mem_profile,
+    )
+    cfg = _trainconfig_from_ckpt_cfg(ck_cfg, overrides)
+
+    model = build_model(cfg)
+    model.load_state_dict(ck["model"], strict=True)
+    model.to(device)
+
+    sp = jload(cfg.split_json)
+    val_ids = filter_excluded(sp["val"])
+    ds_val = DeterministicValDataset(Path(cfg.proc_dir), val_ids, clip_len=cfg.clip_len)
+    dl_val = DataLoader(ds_val, batch_size=cfg.val_batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
+
+    metrics = validate(model, dl_val, device, ddp=False, cfg=cfg)
+    print(metrics)
+
+
+def cmd_infer(args):
+    device = ensure_device(args.device)
+
+    ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    ck_cfg = ck.get("cfg", {}) if isinstance(ck, dict) else {}
+
+    overrides = dict(
+        proc_dir=args.proc_dir or ck_cfg.get("proc_dir", ""),
+        split_json=args.split_json or ck_cfg.get("split_json", ""),
+        out_dir="runs",
+        clip_len=args.clip_len,
+        img_size=args.img_size,
+        expect_t=args.expect_t,
+        batch_size=args.batch_size,
+        val_batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        amp=args.amp,
+        device=args.device,
+        mem_profile=args.mem_profile,
+    )
+    cfg = _trainconfig_from_ckpt_cfg(ck_cfg, overrides)
+
+    model = build_model(cfg)
+    model.load_state_dict(ck["model"], strict=True)
+    model.to(device)
+
+    in_path = Path(args.input_path)
+    if in_path.suffix.lower() in [".tif", ".tiff"]:
+        raw = read_tiff_stack(in_path)
+        proc, meta = preprocess_stack(raw, expect_t=cfg.expect_t, img_size=cfg.img_size)
+        frames_u8 = proc
+        info = {"source": "tiff", "meta": meta}
+    else:
+        frames_u8 = np.load(in_path, mmap_mode=None)
+        info = {"source": "npy"}
+
+    out = infer_full_embryo_from_proc(
+        model, frames_u8=frames_u8, device=device,
+        clip_len=cfg.clip_len, stride=args.stride, trim=args.trim, amp=cfg.amp
+    )
+    out.update(info)
+    out_path = Path(args.out_json)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    jdump(out, out_path)
+    print(f"Saved: {out_path}")
+
+
+# -------------------------
+# Preprocess / Split
+# -------------------------
+def cmd_preprocess(args):
+    in_dir = Path(args.in_dir)
+    proc_dir = Path(args.proc_dir)
+    proc_dir.mkdir(parents=True, exist_ok=True)
+
+    tiffs = sorted([p for p in in_dir.glob("*.tif*")])
+    if not tiffs:
+        raise FileNotFoundError(f"No tiffs in {in_dir}")
+
+    meta_all = {}
+    for p in tiffs:
+        eid = p.stem
+        if is_excluded(eid):
+            continue
+        raw = read_tiff_stack(p, max_pages=args.max_pages if args.max_pages > 0 else None)
+        proc, meta = preprocess_stack(raw, expect_t=args.expect_t, img_size=args.img_size, p_lo=args.p_lo, p_hi=args.p_hi)
+        save_proc_npy(proc_dir, eid, proc)
+        meta_all[eid] = meta
+        if args.limit > 0 and len(meta_all) >= args.limit:
+            break
+
+    jdump({"meta": meta_all, "args": vars(args)}, proc_dir / "preprocess_meta.json")
+    print(f"[done] saved {len(meta_all)} embryos to {proc_dir}")
+
+
+def cmd_make_split(args):
+    proc_dir = Path(args.proc_dir)
+    npys = sorted([p for p in proc_dir.glob("*.npy") if p.name != "preprocess_meta.json"])
+    ids = [p.stem for p in npys if not is_excluded(p.stem)]
+    if not ids:
+        raise ValueError("No embryos found for split.")
+
+    rng = np.random.default_rng(args.seed)
+    rng.shuffle(ids)
+
+    n = len(ids)
+    n_val = int(round(n * args.val_ratio))
+    n_test = int(round(n * args.test_ratio))
+    n_train = max(1, n - n_val - n_test)
+
+    train = ids[:n_train]
+    val = ids[n_train:n_train + n_val]
+    test = ids[n_train + n_val:]
+
+    sp = {"train": train, "val": val, "test": test}
+    out = Path(args.out_json)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    jdump(sp, out)
+    print(f"[split] n={n} train={len(train)} val={len(val)} test={len(test)} -> {out}")
+
+
+# -------------------------
+# CLI
+# -------------------------
+def build_parser():
+    p = argparse.ArgumentParser(prog=MODEL_NAME)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("preprocess")
+    sp.add_argument("--in_dir", required=True)
+    sp.add_argument("--proc_dir", required=True)
+    sp.add_argument("--expect_t", type=int, default=EXPECT_T_DEFAULT)
+    sp.add_argument("--img_size", type=int, default=384)
+    sp.add_argument("--p_lo", type=float, default=1.0)
+    sp.add_argument("--p_hi", type=float, default=99.0)
+    sp.add_argument("--max_pages", type=int, default=0)
+    sp.add_argument("--limit", type=int, default=0)
+    sp.set_defaults(func=cmd_preprocess)
+
+    sp = sub.add_parser("make_split")
+    sp.add_argument("--proc_dir", required=True)
+    sp.add_argument("--out_json", required=True)
+    sp.add_argument("--val_ratio", type=float, default=0.15)
+    sp.add_argument("--test_ratio", type=float, default=0.15)
+    sp.add_argument("--seed", type=int, default=42)
+    sp.set_defaults(func=cmd_make_split)
+
+    sp = sub.add_parser("train")
+    sp.add_argument("--proc_dir", required=True)
+    sp.add_argument("--split_json", required=True)
+    sp.add_argument("--out_dir", required=True)
+
+    sp.add_argument("--epochs", type=int, default=200)
+    sp.add_argument("--batch_size", type=int, default=64)
+    sp.add_argument("--val_batch_size", type=int, default=64)
+    sp.add_argument("--num_workers", type=int, default=8)
+    sp.add_argument("--samples_per_embryo", type=int, default=32)
+    sp.add_argument("--jitter", type=int, default=2)
+    sp.add_argument("--cache_items", type=int, default=16)
+
+    sp.add_argument("--lr", type=float, default=6e-4)
+    sp.add_argument("--weight_decay", type=float, default=0.01)
+    sp.add_argument("--warmup_ratio", type=float, default=0.01)
+    sp.add_argument("--lr_min_ratio", type=float, default=0.05)
+    sp.add_argument("--max_grad_norm", type=float, default=1.0)
+    sp.add_argument("--grad_accum", type=int, default=1)
+
+    sp.add_argument("--clip_len", type=int, default=DEFAULT_CLIP_LEN)
+    sp.add_argument("--img_size", type=int, default=384)
+    sp.add_argument("--expect_t", type=int, default=EXPECT_T_DEFAULT)
+
+    sp.add_argument("--model_dim", type=int, default=128)
+    sp.add_argument("--model_depth", type=int, default=4)
+    sp.add_argument("--model_heads", type=int, default=4)
+    sp.add_argument("--model_mlp_ratio", type=float, default=2.0)
+    sp.add_argument("--drop", type=float, default=0.1)
+    sp.add_argument("--attn_drop", type=float, default=0.0)
+    sp.add_argument("--temporal_drop_p", type=float, default=0.0)
+    sp.add_argument("--temporal_mode", type=str, default="transformer", choices=["transformer", "meanpool", "identity"])
+
+    sp.add_argument("--cnn_base", type=int, default=24)
+    sp.add_argument("--cnn_expand", type=int, default=2)
+    sp.add_argument("--cnn_se_reduction", type=int, default=4)
+
+    sp.add_argument("--mem_profile", type=str, default="balanced", choices=list(MEM_PROFILES.keys()))
+
+    sp.add_argument("--lambda_abs", type=float, default=1.0)
+    sp.add_argument("--lambda_diff", type=float, default=1.0)
+    sp.add_argument("--cons_ramp_ratio", type=float, default=0.2)
+    sp.add_argument("--abs_loss_type", type=str, default="l1", choices=["l1", "smoothl1"])
+
+    sp.add_argument("--seed", type=int, default=42)
+    sp.add_argument("--device", type=str, default="auto")
+    sp.add_argument("--resume", type=str, default="")
+    sp.add_argument("--save_every", type=int, default=1)
+    sp.add_argument("--patience", type=int, default=0)
+
+    sp.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    sp.add_argument("--ema_decay", type=float, default=0.0)
+    sp.add_argument("--ema_start_ratio", type=float, default=0.1)
+    sp.add_argument("--ema_eval", action=argparse.BooleanOptionalAction, default=False)
+    sp.set_defaults(func=cmd_train)
+
+    sp = sub.add_parser("eval")
+    sp.add_argument("--proc_dir", required=True)
+    sp.add_argument("--split_json", required=True)
+    sp.add_argument("--ckpt", required=True)
+    sp.add_argument("--clip_len", type=int, default=DEFAULT_CLIP_LEN)
+    sp.add_argument("--img_size", type=int, default=384)
+    sp.add_argument("--expect_t", type=int, default=EXPECT_T_DEFAULT)
+    sp.add_argument("--batch_size", type=int, default=64)
+    sp.add_argument("--num_workers", type=int, default=4)
+    sp.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    sp.add_argument("--device", type=str, default="auto")
+    sp.add_argument("--mem_profile", type=str, default="balanced", choices=list(MEM_PROFILES.keys()))
+    sp.set_defaults(func=cmd_eval)
+
+    sp = sub.add_parser("infer")
+    sp.add_argument("--ckpt", required=True)
+    sp.add_argument("--input_path", required=True)
+    sp.add_argument("--out_json", required=True)
+    sp.add_argument("--proc_dir", type=str, default="")
+    sp.add_argument("--split_json", type=str, default="")
+    sp.add_argument("--clip_len", type=int, default=DEFAULT_CLIP_LEN)
+    sp.add_argument("--img_size", type=int, default=384)
+    sp.add_argument("--expect_t", type=int, default=EXPECT_T_DEFAULT)
+    sp.add_argument("--batch_size", type=int, default=1)
+    sp.add_argument("--num_workers", type=int, default=0)
+    sp.add_argument("--stride", type=int, default=8)
+    sp.add_argument("--trim", type=float, default=0.2)
+    sp.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
+    sp.add_argument("--device", type=str, default="auto")
+    sp.add_argument("--mem_profile", type=str, default="balanced", choices=list(MEM_PROFILES.keys()))
+    sp.set_defaults(func=cmd_infer)
+
+    return p
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
