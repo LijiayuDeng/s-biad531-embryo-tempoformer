@@ -80,7 +80,8 @@ import json
 sp=json.load(open("$SPLIT","r"))
 for eid in sp["$KEY"]:
     print(eid)
-PY)
+PY
+)
   done
 done
 
