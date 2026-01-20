@@ -1,11 +1,34 @@
+# local secrets / machine-specific config
+.env
+
+# outputs
 runs/
+
+# python cache
+__pycache__/
+*/__pycache__/
+*.pyc
+
+# backups / editor
+*.bak_*
+*.bak
+*.swp
+
+# legacy (do NOT commit)
+scripts/legacy/
+
+# data (never commit)
+data/
 processed*/
+*.npy
+*.npz
 *.pt
 *.pth
-*.npy
+*.ckpt
 *.tif
 *.tiff
+*.ome.tif
+*.ome.tiff
+
+# logs
 *.log
-__pycache__/
-.ipynb_checkpoints/
-.DS_Store

@@ -1,13 +1,66 @@
 # -*- coding: utf-8 -*-
 """
-EmbryoTempoFormer_RouteA (full, working)
+EmbryoTempoFormer
+=================
 
-Key memory fixes (what you were missing):
-- ckpt_frame: checkpoint WHOLE frame encoder per chunk (solves 24-frame graph accumulation OOM)
-- frame_chunk: microbatch frames into CNN
-- ckpt_cnn: optional checkpoint inside CNN blocks (usually off when ckpt_frame=True to avoid nested overhead)
+A single-file, reproducible reference implementation for zebrafish embryo
+developmental "age" estimation from brightfield time-lapse stacks.
 
-CLI commands kept: preprocess / make_split / train / eval / infer
+This script intentionally keeps a minimal dependency footprint and exposes a
+single CLI with five subcommands:
+
+  1) preprocess
+     Convert raw OME-TIF stacks into fixed-shape uint8 `.npy` tensors:
+       - intensity normalized by percentile clipping (p_lo/p_hi)
+       - resized to img_size x img_size
+       - padded/trimmed along time to expect_t frames
+
+  2) make_split
+     Create a JSON split file listing embryo IDs (stems of `.npy` files):
+       {"train":[...], "val":[...], "test":[...]}
+
+  3) train
+     Train a clip-based model with pair sampling:
+       - absolute loss: L1/SmoothL1 on predicted offset time (hpf)
+       - temporal-difference consistency: constrain (p2 - p1) to match known
+         sampling interval DT * (s2 - s1) within the same embryo (optional)
+
+  4) eval
+     Clip-level evaluation on the "val" split using a deterministic dataset.
+     NOTE: clip-level samples are highly correlated within embryo; use embryo-
+     level statistics for inferential claims in a manuscript.
+
+  5) infer
+     Embryo-level inference for a single `.npy` or `.tif/.tiff` stack by sliding
+     windows across the full sequence:
+       - for each window start s: predict offset(s)
+       - convert to t0_hat(s) = offset(s) - DT*s
+       - aggregate across s with trimmed mean -> t0_final
+       - return {t0_final, starts, t0_hats, metrics, source, ...} as JSON
+
+Engineering / reproducibility notes
+-----------------------------------
+- All paths can be relative. Interpret them relative to the current working
+  directory (cwd). Avoid hard-coded /mnt/... paths in release scripts.
+- `argparse` subparsers store a non-serializable function object in `args.func`.
+  We must drop it when writing preprocess/run metadata JSON.
+- Checkpoints store both raw weights and EMA shadow weights (if enabled).
+  Use `--use_ema` in eval/infer to load EMA weights for consistent reporting.
+
+Defaults
+--------
+- T0_HPF = 4.5 and DT_H = 0.25 correspond to S-BIAD531-like staging where
+  frames are sampled every 15 minutes starting at 4.5 hpf.
+  If your acquisition differs, adjust DT_H/T0_HPF accordingly *in analysis*.
+
+This file is long by design to make it easy to ship as a single script in a
+repository release / supplementary material.
+
+Authoring note: "paper-level" docstrings focus on:
+  - what each component does, shapes, and assumptions
+  - statistical pitfalls (pseudo-replication)
+  - why certain engineering choices exist (OOM mitigation, mem profiles)
+
 """
 
 from __future__ import annotations
@@ -51,7 +104,12 @@ try:
 except Exception:
     TVF = None
 
-MODEL_NAME = "EmbryoTempoFormer_RouteA"
+
+# ---------------------------------------------------------------------
+# Public identity
+# ---------------------------------------------------------------------
+MODEL_NAME = "EmbryoTempoFormer"
+DEFAULT_RUNS_DIRNAME = "runs"
 
 # time label (hours post fertilization)
 T0_HPF = 4.5
@@ -60,48 +118,95 @@ DT_H = 0.25
 EXPECT_T_DEFAULT = 192
 DEFAULT_CLIP_LEN = 24
 
+
+# ---------------------------------------------------------------------
+# Manual exclusions (dataset-specific)
+# ---------------------------------------------------------------------
 EXCLUDE_KEYS = {
-    "FishDev_WT_01_1-A3","FishDev_WT_01_1-B3","FishDev_WT_01_1-C3","FishDev_WT_01_1-D3",
-    "FishDev_WT_01_1-E3","FishDev_WT_01_1-F3","FishDev_WT_01_1-G3","FishDev_WT_01_1-H3",
-    "FishDev_WT_02_1-A1","FishDev_WT_02_1-B1","FishDev_WT_02_1-C1","FishDev_WT_02_1-D1",
-    "FishDev_WT_02_1-E1","FishDev_WT_02_1-F1","FishDev_WT_02_1-G1","FishDev_WT_02_1-H1",
-    "FishDev_WT_03_1-A2","FishDev_WT_03_1-B2","FishDev_WT_03_1-C2","FishDev_WT_03_1-D2",
-    "FishDev_WT_03_1-E2","FishDev_WT_03_1-F2","FishDev_WT_03_1-G2","FishDev_WT_03_1-H2",
-    "FishDev_WT_04_1-A2","FishDev_WT_04_1-B2","FishDev_WT_04_1-C2","FishDev_WT_04_1-D2",
-    "FishDev_WT_04_1-E2","FishDev_WT_04_1-F2","FishDev_WT_04_1-G2",
-    "FishDev_WT_05_1-A4","FishDev_WT_05_1-B4","FishDev_WT_05_1-C4","FishDev_WT_05_1-D4",
-    "FishDev_WT_05_1-E4","FishDev_WT_05_1-F4","FishDev_WT_05_1-G4","FishDev_WT_05_1-H4",
+    "FishDev_WT_01_1-A3", "FishDev_WT_01_1-B3", "FishDev_WT_01_1-C3", "FishDev_WT_01_1-D3",
+    "FishDev_WT_01_1-E3", "FishDev_WT_01_1-F3", "FishDev_WT_01_1-G3", "FishDev_WT_01_1-H3",
+    "FishDev_WT_02_1-A1", "FishDev_WT_02_1-B1", "FishDev_WT_02_1-C1", "FishDev_WT_02_1-D1",
+    "FishDev_WT_02_1-E1", "FishDev_WT_02_1-F1", "FishDev_WT_02_1-G1", "FishDev_WT_02_1-H1",
+    "FishDev_WT_03_1-A2", "FishDev_WT_03_1-B2", "FishDev_WT_03_1-C2", "FishDev_WT_03_1-D2",
+    "FishDev_WT_03_1-E2", "FishDev_WT_03_1-F2", "FishDev_WT_03_1-G2", "FishDev_WT_03_1-H2",
+    "FishDev_WT_04_1-A2", "FishDev_WT_04_1-B2", "FishDev_WT_04_1-C2", "FishDev_WT_04_1-D2",
+    "FishDev_WT_04_1-E2", "FishDev_WT_04_1-F2", "FishDev_WT_04_1-G2",
+    "FishDev_WT_05_1-A4", "FishDev_WT_05_1-B4", "FishDev_WT_05_1-C4", "FishDev_WT_05_1-D4",
+    "FishDev_WT_05_1-E4", "FishDev_WT_05_1-F4", "FishDev_WT_05_1-G4", "FishDev_WT_05_1-H4",
 }
 
-# One-arg memory control.
-# ultra/lowmem enable ckpt_frame=True (this is the real OOM fix).
+
+# ---------------------------------------------------------------------
+# Memory profiles
+# ---------------------------------------------------------------------
 MEM_PROFILES = {
+    # Fastest but most memory-hungry.
     "fast":     dict(frame_chunk=16, ckpt_frame=False, ckpt_cnn=False, ckpt_segments=1),
+
+    # Trade memory for compute using checkpointing inside CNN blocks.
     "balanced": dict(frame_chunk=8,  ckpt_frame=False, ckpt_cnn=True,  ckpt_segments=2),
+
+    # Most effective OOM fix: checkpoint the *whole* frame encoder per chunk.
+    # This avoids keeping the entire 24-frame computation graph.
     "lowmem":   dict(frame_chunk=4,  ckpt_frame=True,  ckpt_cnn=False, ckpt_segments=1),
+
+    # Extreme memory saving: process one frame at a time (slow but safe).
     "ultra":    dict(frame_chunk=1,  ckpt_frame=True,  ckpt_cnn=False, ckpt_segments=1),
 }
 
 
-# -------------------------
-# Utils
-# -------------------------
+# ---------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------
 def now_str() -> str:
+    """Return local timestamp string for logs/metadata."""
     return time.strftime("%Y%m%d-%H%M%S", time.localtime())
 
 
 def jdump(obj: Any, path: Path) -> None:
+    """Write JSON to `path` (UTF-8), creating parent directories if needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
 def jload(path: str | Path) -> Any:
+    """Load JSON from `path`."""
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
+def _jsonable_args(args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    Convert argparse.Namespace to a JSON-serializable dict.
+
+    Why needed:
+    - argparse subparsers usually set `args.func = <callable>` via set_defaults().
+    - a Python function object is not JSON serializable.
+    """
+    d = dict(vars(args))
+    d.pop("func", None)
+    return d
+
+
+def _default_out_dir_for_nontrain() -> str:
+    """
+    For eval/infer we still reconstruct a TrainConfig, which expects an out_dir.
+    Use a relative default rooted at cwd.
+    """
+    return str(Path.cwd() / DEFAULT_RUNS_DIRNAME)
+
+
 def dump_run_config(out_dir: Path, cfg: "TrainConfig") -> None:
+    """
+    Save a human-readable run_config.json into out_dir.
+
+    This is a lightweight provenance record:
+    - training config
+    - memory profile details
+    - augmentation defaults
+    - basic environment info (torch/cuda/cudnn)
+    """
     mp = MEM_PROFILES.get(cfg.mem_profile, MEM_PROFILES["balanced"])
     aug = AugParams()
     env = {
@@ -121,6 +226,12 @@ def dump_run_config(out_dir: Path, cfg: "TrainConfig") -> None:
 
 
 def _short_key_from_eid(eid: str) -> str:
+    """
+    Convert a full embryo id (file stem) to a short plate-well key.
+
+    Some datasets encode well info in different patterns; this helper normalizes:
+      FishDev_WT_01_1_MMStack_A1-Site_0.ome  -> FishDev_WT_01_1-A1
+    """
     m = re.search(r"^(?P<prefix>.+?)_MMStack_(?P<well>[A-H]\d{1,2})\b", eid)
     if m:
         return f"{m.group('prefix')}-{m.group('well')}"
@@ -131,15 +242,18 @@ def _short_key_from_eid(eid: str) -> str:
 
 
 def is_excluded(eid: str) -> bool:
+    """Return True if an embryo id matches exclusion rules."""
     sk = _short_key_from_eid(eid)
     return (eid in EXCLUDE_KEYS) or (sk in EXCLUDE_KEYS)
 
 
 def filter_excluded(ids: Sequence[str]) -> List[str]:
+    """Filter a list of ids by EXCLUDE_KEYS."""
     return [x for x in ids if not is_excluded(x)]
 
 
 def seed_all(seed: int) -> None:
+    """Seed Python, NumPy, and PyTorch RNGs for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -147,6 +261,12 @@ def seed_all(seed: int) -> None:
 
 
 def seed_worker(worker_id: int) -> None:
+    """
+    DataLoader worker initialization.
+
+    Ensures each worker has a different deterministic seed. Also notifies datasets
+    that implement `reseed(seed)`.
+    """
     worker_seed = (torch.initial_seed() + worker_id) % (2**32)
     np.random.seed(worker_seed)
     random.seed(worker_seed)
@@ -156,12 +276,18 @@ def seed_worker(worker_id: int) -> None:
 
 
 def ensure_device(device: str) -> torch.device:
+    """
+    Convert device string to torch.device.
+
+    device="auto" chooses CUDA if available else CPU.
+    """
     if device == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device)
 
 
 def mae_rmse_np(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Compute MAE and RMSE (in the same units as input, here hours)."""
     y_true = np.asarray(y_true, dtype=np.float64)
     y_pred = np.asarray(y_pred, dtype=np.float64)
     err = y_pred - y_true
@@ -169,6 +295,7 @@ def mae_rmse_np(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
 
 
 def gn_groups(ch: int, max_groups: int = 8) -> int:
+    """Choose a GroupNorm group count that divides `ch` (<= max_groups)."""
     ch = int(ch)
     for g in range(min(max_groups, ch), 0, -1):
         if ch % g == 0:
@@ -177,6 +304,11 @@ def gn_groups(ch: int, max_groups: int = 8) -> int:
 
 
 def checkpoint_seq(seq: nn.Sequential, segments: int, x: torch.Tensor) -> torch.Tensor:
+    """
+    Checkpoint a sequential module to save memory.
+
+    Uses non-reentrant checkpoint when available (PyTorch>=2.0).
+    """
     segs = max(1, min(int(segments), len(seq)))
     try:
         return checkpoint_sequential(seq, segs, x, use_reentrant=False)
@@ -185,32 +317,44 @@ def checkpoint_seq(seq: nn.Sequential, segments: int, x: torch.Tensor) -> torch.
 
 
 def checkpoint_call(fn, *args):
+    """Checkpoint a single function call (non-reentrant when available)."""
     try:
         return checkpoint(fn, *args, use_reentrant=False)
     except TypeError:
         return checkpoint(fn, *args)
 
 
-# -------------------------
+# ---------------------------------------------------------------------
 # DDP helpers
-# -------------------------
+# ---------------------------------------------------------------------
 def ddp_is_enabled() -> bool:
+    """Return True if torch.distributed is initialized."""
     return dist.is_available() and dist.is_initialized()
 
 
 def ddp_rank() -> int:
+    """Global rank (0 if not DDP)."""
     return dist.get_rank() if ddp_is_enabled() else 0
 
 
 def ddp_is_main() -> bool:
+    """True for global rank 0."""
     return ddp_rank() == 0
 
 
 def ddp_local_rank() -> int:
+    """Local rank from environment (torchrun sets LOCAL_RANK)."""
     return int(os.environ.get("LOCAL_RANK", "0"))
 
 
 def ddp_init() -> Tuple[torch.device, bool]:
+    """
+    Initialize distributed training if launched with torchrun.
+
+    Returns:
+      device: torch.device for this process
+      ddp: bool flag
+    """
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         local_rank = ddp_local_rank()
         if torch.cuda.is_available():
@@ -224,6 +368,7 @@ def ddp_init() -> Tuple[torch.device, bool]:
 
 @torch.no_grad()
 def ddp_all_reduce_sum_(t: torch.Tensor) -> torch.Tensor:
+    """In-place sum-reduce tensor across processes (no-op if not DDP)."""
     if ddp_is_enabled():
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
     return t
@@ -231,6 +376,14 @@ def ddp_all_reduce_sum_(t: torch.Tensor) -> torch.Tensor:
 
 @torch.no_grad()
 def ddp_r2_from_stats(sum_y: torch.Tensor, sum_y2: torch.Tensor, sum_err2: torch.Tensor, n: torch.Tensor) -> float:
+    """
+    Compute R^2 from aggregated stats.
+
+    Uses: SST = sum(y^2) - sum(y)*mean(y)
+          R2 = 1 - SSE/SST
+
+    Returns nan if SST is ~0 or n<2.
+    """
     eps = 1e-12
     n_val = float(n.item())
     if n_val < 2:
@@ -242,10 +395,18 @@ def ddp_r2_from_stats(sum_y: torch.Tensor, sum_y2: torch.Tensor, sum_err2: torch
     return float((1.0 - (sum_err2 / (sst + eps))).item())
 
 
-# -------------------------
+# ---------------------------------------------------------------------
 # TIFF I/O + preprocess
-# -------------------------
+# ---------------------------------------------------------------------
 def read_tiff_stack(path: str | Path, max_pages: Optional[int] = None) -> np.ndarray:
+    """
+    Read a TIFF/OME-TIFF as a [T,H,W] numpy array (dtype determined by file).
+
+    Notes
+    -----
+    - This reads pages sequentially and stacks them in memory.
+    - For very large stacks, use max_pages to cap pages (e.g., 192).
+    """
     if tifffile is None:
         raise RuntimeError("tifffile not installed")
     with tifffile.TiffFile(str(path)) as tf:
@@ -261,6 +422,13 @@ def read_tiff_stack(path: str | Path, max_pages: Optional[int] = None) -> np.nda
 
 
 def percentile_clip_to_u8(arr: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.0) -> Tuple[np.ndarray, Dict[str, float]]:
+    """
+    Percentile clip and normalize to uint8.
+
+    Returns:
+      u8: uint8 array with values in [0,255]
+      meta: dict with actual intensity clip thresholds
+    """
     lo = float(np.percentile(arr, p_lo))
     hi = float(np.percentile(arr, p_hi))
     if hi <= lo + 1e-12:
@@ -273,6 +441,11 @@ def percentile_clip_to_u8(arr: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.0
 
 
 def resize_stack_u8(frames_u8: np.ndarray, img_size: int) -> np.ndarray:
+    """
+    Resize uint8 stack [T,H,W] to [T,img_size,img_size] using PIL bilinear.
+
+    Requires Pillow (PIL).
+    """
     if frames_u8.ndim != 3 or frames_u8.dtype != np.uint8:
         raise ValueError("Expected uint8 [T,H,W]")
     T, H, W = frames_u8.shape
@@ -289,6 +462,13 @@ def resize_stack_u8(frames_u8: np.ndarray, img_size: int) -> np.ndarray:
 
 
 def pad_or_trim_T(frames_u8: np.ndarray, expect_t: int) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Ensure time dimension equals expect_t by trimming or repeating the last frame.
+
+    Returns:
+      frames2: [expect_t,H,W] uint8
+      meta: describes original T and action taken
+    """
     T = int(frames_u8.shape[0])
     meta = {"orig_T": T, "expect_t": int(expect_t), "action": "none"}
     if T == expect_t:
@@ -304,6 +484,13 @@ def pad_or_trim_T(frames_u8: np.ndarray, expect_t: int) -> Tuple[np.ndarray, Dic
 
 
 def preprocess_stack(raw: np.ndarray, expect_t: int, img_size: int, p_lo: float = 1.0, p_hi: float = 99.0) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Full preprocessing pipeline for one raw stack.
+
+    Returns:
+      proc_u8: [expect_t,img_size,img_size] uint8
+      meta: preprocessing metadata (intensity clip thresholds, padding/trim info)
+    """
     u8, clip_meta = percentile_clip_to_u8(raw, p_lo=p_lo, p_hi=p_hi)
     u8 = resize_stack_u8(u8, img_size=img_size)
     u8, t_meta = pad_or_trim_T(u8, expect_t=expect_t)
@@ -311,6 +498,7 @@ def preprocess_stack(raw: np.ndarray, expect_t: int, img_size: int, p_lo: float 
 
 
 def save_proc_npy(proc_dir: Path, eid: str, frames_u8: np.ndarray) -> Path:
+    """Save processed uint8 stack to proc_dir/eid.npy."""
     proc_dir.mkdir(parents=True, exist_ok=True)
     out = proc_dir / f"{eid}.npy"
     np.save(out, frames_u8, allow_pickle=False)
@@ -318,6 +506,7 @@ def save_proc_npy(proc_dir: Path, eid: str, frames_u8: np.ndarray) -> Path:
 
 
 def load_frames_memmap(proc_dir: Path, eid: str) -> np.ndarray:
+    """Load processed stack using numpy memmap (read-only) to reduce RAM usage."""
     path = proc_dir / f"{eid}.npy"
     if not path.exists():
         raise FileNotFoundError(str(path))
@@ -325,40 +514,56 @@ def load_frames_memmap(proc_dir: Path, eid: str) -> np.ndarray:
 
 
 def load_frames_T(proc_dir: Path, eid: str) -> int:
+    """Quickly query the number of frames in an embryo stack."""
     return int(load_frames_memmap(proc_dir, eid).shape[0])
 
 
-# -------------------------
+# ---------------------------------------------------------------------
 # Augmentations
-# -------------------------
+# ---------------------------------------------------------------------
 @dataclass
 class AugParams:
+    """
+    Clip-level augmentation hyperparameters.
+
+    Applied consistently across frames where appropriate (e.g., affine uses
+    identical parameters for all frames).
+    """
     p_hflip: float = 0.5
+
     p_affine: float = 0.5
     max_rotate_deg: float = 8.0
     max_translate: float = 0.03
     scale_min: float = 0.97
     scale_max: float = 1.03
+
     p_gamma: float = 0.5
     gamma_min: float = 0.8
     gamma_max: float = 1.15
+
     p_contrast: float = 0.5
     contrast_min: float = 0.8
     contrast_max: float = 1.15
+
     p_brightness: float = 0.5
     brightness_min: float = -0.07
     brightness_max: float = 0.07
+
     p_shade: float = 0.25
     shade_amp: float = 0.20
+
     p_noise: float = 0.5
     noise_sigma: float = 0.02
+
     p_blur: float = 0.2
     blur_ks: Tuple[int, ...] = (3, 5)
+
     p_frame_drop: float = 0.10
     frame_drop_max: int = 2
 
 
 def _apply_box_blur_u8(frame_u8: np.ndarray, k: int) -> np.ndarray:
+    """Fast box blur using integral image (uint8 -> float -> uint8)."""
     if k <= 1:
         return frame_u8
     pad = k // 2
@@ -372,17 +577,23 @@ def _apply_box_blur_u8(frame_u8: np.ndarray, k: int) -> np.ndarray:
 
 
 def apply_augment_clip_u8(clip_u8: np.ndarray, rng: np.random.Generator, p: AugParams) -> np.ndarray:
+    """
+    Apply stochastic augmentations to a clip [L,H,W] uint8.
+
+    Returns a new uint8 clip. Augmentations are designed to be mild and preserve
+    staging-relevant morphology.
+    """
     out = clip_u8.copy()
     L, H, W = out.shape
 
-    # frame drop
+    # frame drop: replace some frames with previous frame
     if rng.random() < p.p_frame_drop and p.frame_drop_max > 0:
         n_drop = int(rng.integers(1, p.frame_drop_max + 1))
         for _ in range(n_drop):
             t = int(rng.integers(1, L))
             out[t] = out[t - 1]
 
-    # hflip
+    # horizontal flip
     if rng.random() < p.p_hflip:
         out = out[:, :, ::-1].copy()
 
@@ -410,18 +621,21 @@ def apply_augment_clip_u8(clip_u8: np.ndarray, rng: np.random.Generator, p: AugP
         out = np.stack(tmp, axis=0)
 
     xf = out.astype(np.float32) / 255.0
+
     if rng.random() < p.p_gamma:
         gamma = float(rng.uniform(p.gamma_min, p.gamma_max))
         xf = np.clip(xf, 0.0, 1.0) ** gamma
+
     if rng.random() < p.p_contrast:
         c = float(rng.uniform(p.contrast_min, p.contrast_max))
         m = float(np.mean(xf))
         xf = (xf - m) * c + m
+
     if rng.random() < p.p_brightness:
         b = float(rng.uniform(p.brightness_min, p.brightness_max))
         xf = xf + b
 
-    # shade
+    # shade: multiplicative low-frequency field
     if rng.random() < p.p_shade:
         grid = rng.normal(loc=0.0, scale=1.0, size=(8, 8)).astype(np.float32)
         grid = (grid - grid.mean()) / (grid.std() + 1e-6)
@@ -438,14 +652,12 @@ def apply_augment_clip_u8(clip_u8: np.ndarray, rng: np.random.Generator, p: AugP
             shade_u = np.clip(shade_u, 0.75, 1.25)
         xf = xf * shade_u[None, :, :]
 
-    # noise
     if rng.random() < p.p_noise:
         xf = xf + rng.normal(loc=0.0, scale=p.noise_sigma, size=xf.shape).astype(np.float32)
 
     xf = np.clip(xf, 0.0, 1.0)
     out = (xf * 255.0 + 0.5).astype(np.uint8)
 
-    # blur
     if rng.random() < p.p_blur:
         k = int(rng.choice(np.array(p.blur_ks)))
         for t in range(L):
@@ -454,10 +666,11 @@ def apply_augment_clip_u8(clip_u8: np.ndarray, rng: np.random.Generator, p: AugP
     return out
 
 
-# -------------------------
+# ---------------------------------------------------------------------
 # Datasets
-# -------------------------
+# ---------------------------------------------------------------------
 class _LRUCache:
+    """Very small LRU cache to avoid repeated memmap open overhead."""
     def __init__(self, max_items: int = 16):
         self.max_items = int(max_items)
         self._data: Dict[str, Any] = {}
@@ -484,6 +697,26 @@ class _LRUCache:
 
 
 class PairQueueDataset(Dataset):
+    """
+    Pair sampling dataset for temporal-difference consistency training.
+
+    Each __getitem__ returns two clips from the same embryo:
+      clip1 starting at s1 and clip2 starting at s2
+
+    Returned fields:
+      x1, x2 : float tensors [L,1,H,W] in [0,1]
+      offset1, offset2 : scalar targets in hours (T0_HPF + DT_H*s)
+      start1, start2 : start indices (integers)
+
+    Why pair sampling?
+    - Absolute supervision: predict the correct offset time for each clip.
+    - Difference supervision (optional): encourage p2 - p1 ≈ DT_H*(s2 - s1)
+      within the same embryo, making predictions temporally consistent.
+
+    Important: this dataset produces correlated samples within each embryo. Use
+    embryo-level statistics for downstream inferential claims.
+    """
+
     def __init__(
         self,
         proc_dir: Path,
@@ -550,6 +783,8 @@ class PairQueueDataset(Dataset):
 
         s1 = self._pop_start(eid, max_start_real)
         s2 = self._pop_start(eid, max_start_real)
+
+        # jitter around sampled starts to reduce periodicity and improve coverage
         if self.jitter > 0 and max_start_real > 0:
             s1 = int(np.clip(s1 + int(self.rng.integers(-self.jitter, self.jitter + 1)), 0, max_start_real))
             s2 = int(np.clip(s2 + int(self.rng.integers(-self.jitter, self.jitter + 1)), 0, max_start_real))
@@ -579,6 +814,22 @@ class PairQueueDataset(Dataset):
 
 
 class DeterministicValDataset(Dataset):
+    """
+    Deterministic clip-level evaluation dataset.
+
+    For each embryo, enumerates all possible window starts:
+      s = 0..(T - clip_len)
+
+    Output sample:
+      x : [L,1,H,W] float in [0,1]
+      target : scalar offset time (hours)
+
+    Note on statistics:
+    - Samples from the same embryo are strongly correlated.
+    - Clip-level MAE/RMSE are useful for tracking training but are not a valid
+      unit for hypothesis testing; use embryo-level inference in analysis.
+    """
+
     def __init__(self, proc_dir: Path, embryo_ids: Sequence[str], clip_len: int):
         self.proc_dir = Path(proc_dir)
         self.clip_len = int(clip_len)
@@ -610,10 +861,11 @@ class DeterministicValDataset(Dataset):
         return {"eid": eid, "start": int(s), "x": x, "target": torch.tensor(target, dtype=torch.float32)}
 
 
-# -------------------------
-# Model
-# -------------------------
+# ---------------------------------------------------------------------
+# Model components
+# ---------------------------------------------------------------------
 class SEBlock(nn.Module):
+    """Squeeze-and-Excitation (channel attention) block."""
     def __init__(self, channels: int, reduction: int = 4, min_hidden: int = 8):
         super().__init__()
         hidden = max(channels // reduction, min_hidden)
@@ -630,6 +882,12 @@ class SEBlock(nn.Module):
 
 
 class DSConvSEBlock(nn.Module):
+    """
+    Depthwise-separable conv block with SE and GroupNorm.
+
+    Intended as a lightweight CNN backbone appropriate for small batch sizes
+    (GroupNorm is stable vs BatchNorm in DDP/small-batch regimes).
+    """
     def __init__(self, c_in: int, c_out: int, stride: int = 1, expand_ratio: int = 2, se_reduction: int = 4):
         super().__init__()
         mid = c_in * expand_ratio
@@ -651,6 +909,20 @@ class DSConvSEBlock(nn.Module):
 
 
 class FrameEncoderLite(nn.Module):
+    """
+    Lightweight per-frame CNN encoder.
+
+    Input:
+      x: [B,1,H,W] float (0..1)
+
+    Output:
+      token: [B,D] float, where D=d_model
+
+    Notes:
+    - We intentionally compress each frame into a single token via global pooling.
+      This makes the temporal module operate at the frame-token level.
+    - Memory: optionally checkpoint CNN blocks during training.
+    """
     def __init__(
         self,
         d_model: int,
@@ -691,6 +963,11 @@ class FrameEncoderLite(nn.Module):
 
 
 class RoPE1D(nn.Module):
+    """
+    Rotary positional embedding for 1D sequences.
+
+    Applied to Q,K in attention, enabling relative-position modeling.
+    """
     def __init__(self, head_dim: int, base: float = 10000.0):
         super().__init__()
         if head_dim % 2 != 0:
@@ -717,6 +994,19 @@ class RoPE1D(nn.Module):
 
 
 class TemporalBlock(nn.Module):
+    """
+    Transformer block for temporal token sequences.
+
+    Input:
+      x: [B,L,D]
+
+    Output:
+      x': [B,L,D]
+
+    Notes:
+    - Uses RoPE for Q/K.
+    - Uses PyTorch scaled_dot_product_attention when available (flash/SDPA).
+    """
     def __init__(self, d_model: int, n_heads: int, mlp_ratio: float = 2.0, dropout: float = 0.1, attn_drop: float = 0.0):
         super().__init__()
         if d_model % n_heads != 0:
@@ -759,7 +1049,10 @@ class TemporalBlock(nn.Module):
         k = self.rope.apply(k, cos, sin)
 
         if hasattr(F, "scaled_dot_product_attention"):
-            a = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.drop.p if self.training else 0.0)
+            a = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=None,
+                dropout_p=self.drop.p if self.training else 0.0
+            )
         else:
             scale = self.head_dim ** -0.5
             attn = (q @ k.transpose(-2, -1)) * scale
@@ -775,7 +1068,27 @@ class TemporalBlock(nn.Module):
         return x
 
 
-class TempoFormerRouteA(nn.Module):
+class EmbryoTempoFormer(nn.Module):
+    """
+    Main model: per-frame CNN tokens + temporal aggregation + regression head.
+
+    Input:
+      x: [B, L, 1, H, W] float in [0,1]
+         where L is clip_len (default 24).
+
+    Output:
+      pred: [B] float (hours, predicted offset time)
+
+    Temporal modes:
+      - identity : use only the first frame (single-frame baseline)
+      - meanpool : average tokens across frames
+      - transformer : prepend CLS and run temporal transformer blocks
+
+    Memory controls:
+      - frame_chunk : how many frames to encode per CNN call
+      - ckpt_frame  : checkpoint whole frame encoder per chunk (OOM fix)
+    """
+
     def __init__(
         self,
         d_model: int = 128,
@@ -814,7 +1127,13 @@ class TempoFormerRouteA(nn.Module):
         nn.init.trunc_normal_(self.cls_token, std=0.02)
 
         self.blocks = nn.ModuleList([
-            TemporalBlock(d_model=self.d_model, n_heads=int(n_heads), mlp_ratio=float(mlp_ratio), dropout=float(dropout), attn_drop=float(attn_drop))
+            TemporalBlock(
+                d_model=self.d_model,
+                n_heads=int(n_heads),
+                mlp_ratio=float(mlp_ratio),
+                dropout=float(dropout),
+                attn_drop=float(attn_drop),
+            )
             for _ in range(int(depth))
         ])
         self.norm = nn.LayerNorm(self.d_model)
@@ -827,6 +1146,15 @@ class TempoFormerRouteA(nn.Module):
         )
 
     def _encode_frames(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Encode frames in chunks to control memory.
+
+        Args:
+          x: [B,L,1,H,W]
+
+        Returns:
+          tokens: [B,L,D]
+        """
         B, L, C, H, W = x.shape
         chunk = self.frame_chunk if self.frame_chunk > 0 else L
         toks = []
@@ -843,7 +1171,7 @@ class TempoFormerRouteA(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim != 5:
             raise ValueError(f"Expected [B,L,1,H,W], got {x.shape}")
-        B, _, _, _, _ = x.shape
+        B = x.shape[0]
 
         mode = self.temporal_mode
         if mode not in ("transformer", "meanpool", "identity"):
@@ -853,9 +1181,9 @@ class TempoFormerRouteA(nn.Module):
         if mode == "identity":
             x = x[:, :1]
 
-        tok = self._encode_frames(x)  # [B, Ltok, D]
+        tok = self._encode_frames(x)  # [B,Ltok,D]
 
-        # temporal token drop (only makes sense if Ltok > 1)
+        # temporal token drop (regularization)
         if self.training and self.temporal_drop_p > 0 and tok.shape[1] > 1:
             mask = (torch.rand(B, tok.shape[1], 1, device=tok.device) > self.temporal_drop_p).to(tok.dtype)
             tok = tok * mask / (1.0 - self.temporal_drop_p)
@@ -877,10 +1205,16 @@ class TempoFormerRouteA(nn.Module):
         return self.head(h[:, 0]).squeeze(-1)
 
 
-# -------------------------
+# ---------------------------------------------------------------------
 # EMA
-# -------------------------
+# ---------------------------------------------------------------------
 class EMA:
+    """
+    Exponential moving average of model weights.
+
+    We store a shadow state_dict. During eval, we can temporarily swap model
+    weights with EMA weights for smoother metrics.
+    """
     def __init__(self, model: nn.Module, decay: float = 0.995):
         self.decay = float(decay)
         self.shadow: Dict[str, torch.Tensor] = {}
@@ -920,11 +1254,16 @@ class EMA:
         m.load_state_dict(backup, strict=True)
 
 
-# -------------------------
-# Train/Eval
-# -------------------------
+# ---------------------------------------------------------------------
+# Training config and helpers
+# ---------------------------------------------------------------------
 @dataclass
 class TrainConfig:
+    """
+    Training configuration (stored into checkpoint for reproducibility).
+
+    Paths are strings to keep this dataclass JSON-friendly.
+    """
     proc_dir: str
     split_json: str
     out_dir: str
@@ -981,8 +1320,9 @@ class TrainConfig:
 
 
 def build_model(cfg: TrainConfig) -> nn.Module:
+    """Construct EmbryoTempoFormer from a TrainConfig + memory profile."""
     mp = MEM_PROFILES.get(cfg.mem_profile, MEM_PROFILES["balanced"])
-    return TempoFormerRouteA(
+    return EmbryoTempoFormer(
         d_model=cfg.model_dim,
         depth=cfg.model_depth,
         n_heads=cfg.model_heads,
@@ -1002,13 +1342,17 @@ def build_model(cfg: TrainConfig) -> nn.Module:
 
 
 def build_loaders(cfg: TrainConfig, ddp: bool):
+    """Build training/validation DataLoaders and samplers."""
     sp = jload(cfg.split_json)
     train_ids = filter_excluded(sp["train"])
     val_ids = filter_excluded(sp["val"])
     aug = AugParams()
 
-    ds_train = PairQueueDataset(Path(cfg.proc_dir), train_ids, cfg.clip_len, True, aug, cfg.seed,
-                                cfg.samples_per_embryo, cfg.jitter, cfg.cache_items)
+    ds_train = PairQueueDataset(
+        Path(cfg.proc_dir), train_ids, cfg.clip_len,
+        True, aug, cfg.seed,
+        cfg.samples_per_embryo, cfg.jitter, cfg.cache_items
+    )
     ds_val = DeterministicValDataset(Path(cfg.proc_dir), val_ids, cfg.clip_len)
 
     train_sampler = DistributedSampler(ds_train, shuffle=True) if ddp else None
@@ -1047,7 +1391,23 @@ def build_loaders(cfg: TrainConfig, ddp: bool):
     return dl_train, dl_val, train_sampler, val_sampler
 
 
-def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, ema, epoch: int, step: int, cfg: TrainConfig, best_mae: float):
+def save_checkpoint(
+    path: Path,
+    model,
+    optimizer,
+    scheduler,
+    scaler,
+    ema,
+    epoch: int,
+    step: int,
+    cfg: TrainConfig,
+    best_mae: float
+):
+    """
+    Save training state (model/optim/scheduler/scaler/ema + cfg/meta).
+
+    `ema` is stored as a raw state_dict-like mapping (ema.shadow).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = model.module if isinstance(model, DDP) else model
     state = {
@@ -1066,6 +1426,7 @@ def save_checkpoint(path: Path, model, optimizer, scheduler, scaler, ema, epoch:
 
 
 def load_checkpoint(path: str, model, optimizer=None, scheduler=None, scaler=None, ema=None) -> Tuple[int, int, float]:
+    """Load checkpoint into model and optional optimizer/scheduler/scaler/ema."""
     state = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(state["model"], strict=True)
     if optimizer is not None and state.get("optimizer") is not None:
@@ -1080,12 +1441,14 @@ def load_checkpoint(path: str, model, optimizer=None, scheduler=None, scaler=Non
 
 
 def linear_ramp(step: int, ramp_steps: int) -> float:
+    """Linear ramp from 0->1 over ramp_steps (used for consistency loss warm-up)."""
     if ramp_steps <= 0:
         return 1.0
     return float(min(1.0, (step + 1) / float(ramp_steps)))
 
 
 def _abs_loss(pred: torch.Tensor, target: torch.Tensor, kind: str) -> torch.Tensor:
+    """Absolute-time regression loss (L1 or SmoothL1)."""
     if kind == "smoothl1":
         return F.smooth_l1_loss(pred, target)
     return F.l1_loss(pred, target)
@@ -1106,19 +1469,33 @@ def train_one_epoch(
     global_step: int,
     total_optim_steps: int,
 ) -> Tuple[Dict[str, float], int]:
+    """
+    One epoch of training.
+
+    Objective:
+      loss_abs  = average abs regression loss on two clips
+      loss_cons = SmoothL1( (p2 - p1), DT_H*(s2 - s1) )
+      loss      = lambda_abs * loss_abs + lambda_diff * ramp(step)*loss_cons
+
+    Where:
+      p1,p2 are predicted offsets (hours),
+      s1,s2 are start indices,
+      DT_H is sampling interval in hours.
+    """
     model.train()
     if train_sampler is not None:
         train_sampler.set_epoch(epoch)
 
-    sums = torch.zeros(6, device=device)  # [loss, abs, cons, |err|, err^2, n_samples]
+    # [loss, abs, cons, |err|, err^2, n_samples]
+    sums = torch.zeros(6, device=device)
     ramp_steps = int(cfg.cons_ramp_ratio * total_optim_steps)
 
     autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else None
 
     optimizer.zero_grad(set_to_none=True)
     accum = max(1, int(cfg.grad_accum))
-
     local_iter = 0
+
     for batch in dl_train:
         x1 = batch["x1"].to(device, non_blocking=True)
         x2 = batch["x2"].to(device, non_blocking=True)
@@ -1164,6 +1541,7 @@ def train_one_epoch(
         if do_step:
             if scaler is not None and scaler.is_enabled():
                 scaler.unscale_(optimizer)
+
             if cfg.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.max_grad_norm)
 
@@ -1214,9 +1592,17 @@ def train_one_epoch(
 
 @torch.no_grad()
 def validate(model, dl_val, device: torch.device, ddp: bool, cfg: TrainConfig) -> Dict[str, float]:
+    """
+    Clip-level validation.
+
+    Returns dict:
+      loss, mae, rmse, r2
+
+    Note: this is clip-level and correlated within embryo.
+    """
     model.eval()
-    sums = torch.zeros(4, device=device)  # [loss, |err|, err^2, n]
-    r2_sums = torch.zeros(4, device=device)  # sum_y, sum_y2, sum_err2, n
+    sums = torch.zeros(4, device=device)    # [loss, |err|, err^2, n]
+    r2_sums = torch.zeros(4, device=device) # sum_y, sum_y2, sum_err2, n
 
     autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else None
 
@@ -1261,17 +1647,17 @@ def validate(model, dl_val, device: torch.device, ddp: bool, cfg: TrainConfig) -
     return metrics
 
 
-def _trainconfig_from_ckpt_cfg(
-    ck_cfg: Dict[str, Any],
-    overrides: Dict[str, Any],
-) -> TrainConfig:
-    # keep only known fields
+def _trainconfig_from_ckpt_cfg(ck_cfg: Dict[str, Any], overrides: Dict[str, Any]) -> TrainConfig:
+    """Rebuild TrainConfig from checkpoint cfg dict, applying overrides."""
     fields = set(TrainConfig.__dataclass_fields__.keys())
     base = {k: ck_cfg[k] for k in ck_cfg.keys() if k in fields}
     base.update(overrides)
     return TrainConfig(**base)
 
 
+# ---------------------------------------------------------------------
+# Commands: train / eval / infer / preprocess / make_split
+# ---------------------------------------------------------------------
 def cmd_train(args):
     cfg = TrainConfig(
         proc_dir=args.proc_dir, split_json=args.split_json, out_dir=args.out_dir,
@@ -1305,10 +1691,13 @@ def cmd_train(args):
 
     model = build_model(cfg).to(device)
     if ddp:
-        model = DDP(model, device_ids=[device.index] if device.type == "cuda" else None, find_unused_parameters=(cfg.temporal_mode != "transformer"))
+        model = DDP(
+            model,
+            device_ids=[device.index] if device.type == "cuda" else None,
+            find_unused_parameters=(cfg.temporal_mode != "transformer")
+        )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
-
     dl_train, dl_val, train_sampler, _ = build_loaders(cfg, ddp=ddp)
 
     steps_per_epoch = max(1, math.ceil(len(dl_train) / max(1, int(cfg.grad_accum))))
@@ -1344,6 +1733,7 @@ def cmd_train(args):
     start_epoch = 0
     global_step = 0
     best_mae = float("inf")
+
     if cfg.resume:
         raw = model.module if isinstance(model, DDP) else model
         se, ss, bm = load_checkpoint(cfg.resume, raw, optimizer, scheduler, scaler, ema)
@@ -1353,6 +1743,7 @@ def cmd_train(args):
         if ddp_is_main():
             print(f"[resume] epoch={start_epoch} global_step={global_step} best_mae={best_mae:.6f}")
 
+    # initialize history.csv
     if ddp_is_main() and not hist_path.exists():
         with open(hist_path, "w", newline="", encoding="utf-8") as f:
             csv.writer(f).writerow([
@@ -1373,11 +1764,14 @@ def cmd_train(args):
             total_optim_steps=total_optim_steps,
         )
 
+        # EMA eval swap
         backup = None
         if ema is not None and cfg.ema_eval:
             raw = model.module if isinstance(model, DDP) else model
             backup = ema.copy_to(raw)
+
         val_m = validate(model, dl_val, device, ddp, cfg)
+
         if backup is not None and ema is not None:
             raw = model.module if isinstance(model, DDP) else model
             ema.restore(raw, backup)
@@ -1411,13 +1805,76 @@ def cmd_train(args):
         dist.destroy_process_group()
 
 
-# -------------------------
-# Eval / Infer
-# -------------------------
+def _load_ckpt_weights_into_model(model: nn.Module, ck: Dict[str, Any], use_ema: bool) -> None:
+    """
+    Load weights from checkpoint into model.
+
+    ck["model"] always exists.
+    ck["ema"] may exist if EMA was enabled; it is stored as a state_dict mapping.
+    """
+    if use_ema and ck.get("ema") is not None:
+        model.load_state_dict(ck["ema"], strict=True)
+    else:
+        model.load_state_dict(ck["model"], strict=True)
+
+
+def cmd_eval(args):
+    """
+    Evaluate clip-level metrics on the validation split.
+
+    This uses DeterministicValDataset (all starts per embryo), so metrics are
+    clip-level and correlated. Use embryo-level analysis for statistical claims.
+    """
+    device = ensure_device(args.device)
+
+    ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+    ck_cfg = ck.get("cfg", {}) if isinstance(ck, dict) else {}
+
+    overrides = dict(
+        proc_dir=args.proc_dir,
+        split_json=args.split_json,
+        out_dir=_default_out_dir_for_nontrain(),
+        clip_len=args.clip_len,
+        img_size=args.img_size,
+        expect_t=args.expect_t,
+        batch_size=args.batch_size,
+        val_batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        amp=args.amp,
+        device=args.device,
+        mem_profile=args.mem_profile,
+    )
+    cfg = _trainconfig_from_ckpt_cfg(ck_cfg, overrides)
+
+    model = build_model(cfg)
+    _load_ckpt_weights_into_model(model, ck, use_ema=bool(args.use_ema))
+    model.to(device)
+
+    sp = jload(cfg.split_json)
+    val_ids = filter_excluded(sp["val"])
+    ds_val = DeterministicValDataset(Path(cfg.proc_dir), val_ids, clip_len=cfg.clip_len)
+    dl_val = DataLoader(ds_val, batch_size=cfg.val_batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
+
+    metrics = validate(model, dl_val, device, ddp=False, cfg=cfg)
+    print(metrics)
+
+
 def trimmed_mean(x: Sequence[float], trim: float = 0.2) -> float:
+    """
+    Robust trimmed mean.
+
+    trim=0.0 means ordinary mean.
+    trim=0.2 means drop 20% lowest and 20% highest values.
+    """
     xs = np.sort(np.asarray(list(x), dtype=np.float64))
     if xs.size == 0:
         return float("nan")
+    k = int(trim * xs.size)
+    if k <= 0:
+        return float(xs.mean())
+    if 2 * k >= xs.size:
+        return float(xs.mean())
+    return float(xs[k:-k].mean())
     k = int(trim * xs.size)
     if 2 * k >= xs.size:
         return float(np.mean(xs))
@@ -1434,78 +1891,79 @@ def infer_full_embryo_from_proc(
     trim: float = 0.2,
     amp: bool = True,
 ) -> Dict[str, Any]:
+    """
+    Embryo-level inference on a full sequence.
+
+    For each window start s:
+      - predict offset(s) in hours
+      - compute t0_hat(s) = offset(s) - DT_H*s
+
+    Aggregate:
+      t0_final = trimmed_mean(t0_hat(s), trim)
+
+    Also returns simple metrics against a nominal time axis:
+      y_true(t) = T0_HPF + DT_H*t
+      y_pred(t) = t0_final + DT_H*t
+    These are *not* external-temperature ground truth metrics; they mainly serve
+    as internal consistency checks.
+
+    Returns JSON-serializable dict.
+    """
     model.eval()
     T = int(frames_u8.shape[0])
     starts = list(range(0, max(1, T - clip_len + 1), int(stride)))
     t0_hats = []
+
     autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else None
+
     for s in starts:
         clip = np.asarray(frames_u8[s:s + clip_len], dtype=np.uint8)
         if clip.shape[0] != clip_len:
             pad = clip_len - clip.shape[0]
             clip = np.concatenate([clip, np.repeat(clip[-1:], pad, axis=0)], axis=0)
+
         x = torch.from_numpy(np.ascontiguousarray(clip)).unsqueeze(0).unsqueeze(2).float().to(device) / 255.0
         if amp and device.type == "cuda":
             x = x.half()
+
         if autocast_ctx is not None:
             with autocast_ctx(enabled=(amp and device.type == "cuda")):
                 offset = float(model(x).item())
         else:
             offset = float(model(x).item())
+
         t0_hats.append(offset - DT_H * s)
+
     t0_final = trimmed_mean(t0_hats, trim=trim)
+
     y_pred = t0_final + DT_H * np.arange(T, dtype=np.float64)
     y_true = T0_HPF + DT_H * np.arange(T, dtype=np.float64)
     metrics = mae_rmse_np(y_true, y_pred)
+
     return {"t0_final": float(t0_final), "starts": starts, "t0_hats": t0_hats, "metrics": metrics}
 
 
-def cmd_eval(args):
-    device = ensure_device(args.device)
-
-    ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    ck_cfg = ck.get("cfg", {}) if isinstance(ck, dict) else {}
-
-    # rebuild model cfg from checkpoint to avoid shape mismatch
-    overrides = dict(
-        proc_dir=args.proc_dir,
-        split_json=args.split_json,
-        out_dir="runs",
-        clip_len=args.clip_len,
-        img_size=args.img_size,
-        expect_t=args.expect_t,
-        batch_size=args.batch_size,
-        val_batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        amp=args.amp,
-        device=args.device,
-        mem_profile=args.mem_profile,
-    )
-    cfg = _trainconfig_from_ckpt_cfg(ck_cfg, overrides)
-
-    model = build_model(cfg)
-    model.load_state_dict(ck["model"], strict=True)
-    model.to(device)
-
-    sp = jload(cfg.split_json)
-    val_ids = filter_excluded(sp["val"])
-    ds_val = DeterministicValDataset(Path(cfg.proc_dir), val_ids, clip_len=cfg.clip_len)
-    dl_val = DataLoader(ds_val, batch_size=cfg.val_batch_size, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
-
-    metrics = validate(model, dl_val, device, ddp=False, cfg=cfg)
-    print(metrics)
-
-
 def cmd_infer(args):
+    """
+    Inference for a single embryo stack.
+
+    - input_path can be `.npy` (preferred) or `.tif/.tiff` (will preprocess on the fly)
+    - output is a JSON file containing embryo-level inference results
+
+    Note: This command reconstructs a TrainConfig from the checkpoint cfg to
+    build the correct model architecture (dim/depth/temporal_mode/etc.).
+    """
     device = ensure_device(args.device)
 
     ck = torch.load(args.ckpt, map_location="cpu", weights_only=False)
     ck_cfg = ck.get("cfg", {}) if isinstance(ck, dict) else {}
+
+    inferred_out_dir = str(Path(args.out_json).resolve().parent)
 
     overrides = dict(
         proc_dir=args.proc_dir or ck_cfg.get("proc_dir", ""),
         split_json=args.split_json or ck_cfg.get("split_json", ""),
-        out_dir="runs",
+        out_dir=inferred_out_dir,
         clip_len=args.clip_len,
         img_size=args.img_size,
         expect_t=args.expect_t,
@@ -1519,10 +1977,12 @@ def cmd_infer(args):
     cfg = _trainconfig_from_ckpt_cfg(ck_cfg, overrides)
 
     model = build_model(cfg)
-    model.load_state_dict(ck["model"], strict=True)
+    _load_ckpt_weights_into_model(model, ck, use_ema=bool(args.use_ema))
     model.to(device)
 
     in_path = Path(args.input_path)
+
+    # Accept either processed npy or raw tiff.
     if in_path.suffix.lower() in [".tif", ".tiff"]:
         raw = read_tiff_stack(in_path)
         proc, meta = preprocess_stack(raw, expect_t=cfg.expect_t, img_size=cfg.img_size)
@@ -1533,20 +1993,31 @@ def cmd_infer(args):
         info = {"source": "npy"}
 
     out = infer_full_embryo_from_proc(
-        model, frames_u8=frames_u8, device=device,
-        clip_len=cfg.clip_len, stride=args.stride, trim=args.trim, amp=cfg.amp
+        model,
+        frames_u8=frames_u8,
+        device=device,
+        clip_len=cfg.clip_len,
+        stride=args.stride,
+        trim=args.trim,
+        amp=cfg.amp,
     )
     out.update(info)
+
     out_path = Path(args.out_json)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     jdump(out, out_path)
     print(f"Saved: {out_path}")
 
 
-# -------------------------
-# Preprocess / Split
-# -------------------------
 def cmd_preprocess(args):
+    """
+    Preprocess a directory of TIFF/OME-TIFF files into processed `.npy`.
+
+    Notes:
+    - This function does NOT recurse into subdirectories. Point --in_dir at the
+      directory containing the tif files.
+    - It writes a single preprocess_meta.json summarizing per-file preprocessing.
+    """
     in_dir = Path(args.in_dir)
     proc_dir = Path(args.proc_dir)
     proc_dir.mkdir(parents=True, exist_ok=True)
@@ -1567,13 +2038,19 @@ def cmd_preprocess(args):
         if args.limit > 0 and len(meta_all) >= args.limit:
             break
 
-    jdump({"meta": meta_all, "args": vars(args)}, proc_dir / "preprocess_meta.json")
+    # IMPORTANT: args contains `func` (callable) -> not JSON serializable.
+    jdump({"meta": meta_all, "args": _jsonable_args(args)}, proc_dir / "preprocess_meta.json")
     print(f"[done] saved {len(meta_all)} embryos to {proc_dir}")
 
 
 def cmd_make_split(args):
+    """
+    Create a split JSON by scanning proc_dir for `*.npy` files.
+
+    Output JSON has keys: train/val/test.
+    """
     proc_dir = Path(args.proc_dir)
-    npys = sorted([p for p in proc_dir.glob("*.npy") if p.name != "preprocess_meta.json"])
+    npys = sorted([p for p in proc_dir.glob("*.npy")])
     ids = [p.stem for p in npys if not is_excluded(p.stem)]
     if not ids:
         raise ValueError("No embryos found for split.")
@@ -1597,25 +2074,27 @@ def cmd_make_split(args):
     print(f"[split] n={n} train={len(train)} val={len(val)} test={len(test)} -> {out}")
 
 
-# -------------------------
+# ---------------------------------------------------------------------
 # CLI
-# -------------------------
+# ---------------------------------------------------------------------
 def build_parser():
     p = argparse.ArgumentParser(prog=MODEL_NAME)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("preprocess")
-    sp.add_argument("--in_dir", required=True)
-    sp.add_argument("--proc_dir", required=True)
-    sp.add_argument("--expect_t", type=int, default=EXPECT_T_DEFAULT)
-    sp.add_argument("--img_size", type=int, default=384)
-    sp.add_argument("--p_lo", type=float, default=1.0)
-    sp.add_argument("--p_hi", type=float, default=99.0)
-    sp.add_argument("--max_pages", type=int, default=0)
-    sp.add_argument("--limit", type=int, default=0)
+    # preprocess
+    sp = sub.add_parser("preprocess", help="Preprocess TIFF/OME-TIFF stacks into fixed-shape uint8 .npy")
+    sp.add_argument("--in_dir", required=True, help="Directory containing *.tif* files (non-recursive).")
+    sp.add_argument("--proc_dir", required=True, help="Output directory for processed *.npy and preprocess_meta.json.")
+    sp.add_argument("--expect_t", type=int, default=EXPECT_T_DEFAULT, help="Target number of frames (pad/trim).")
+    sp.add_argument("--img_size", type=int, default=384, help="Resize output frames to img_size x img_size.")
+    sp.add_argument("--p_lo", type=float, default=1.0, help="Lower percentile for intensity clipping.")
+    sp.add_argument("--p_hi", type=float, default=99.0, help="Upper percentile for intensity clipping.")
+    sp.add_argument("--max_pages", type=int, default=0, help="Cap TIFF pages read (0=all).")
+    sp.add_argument("--limit", type=int, default=0, help="Limit number of embryos processed (0=no limit).")
     sp.set_defaults(func=cmd_preprocess)
 
-    sp = sub.add_parser("make_split")
+    # make_split
+    sp = sub.add_parser("make_split", help="Create train/val/test split JSON by scanning proc_dir/*.npy")
     sp.add_argument("--proc_dir", required=True)
     sp.add_argument("--out_json", required=True)
     sp.add_argument("--val_ratio", type=float, default=0.15)
@@ -1623,7 +2102,8 @@ def build_parser():
     sp.add_argument("--seed", type=int, default=42)
     sp.set_defaults(func=cmd_make_split)
 
-    sp = sub.add_parser("train")
+    # train
+    sp = sub.add_parser("train", help="Train EmbryoTempoFormer with pair sampling and optional consistency loss.")
     sp.add_argument("--proc_dir", required=True)
     sp.add_argument("--split_json", required=True)
     sp.add_argument("--out_dir", required=True)
@@ -1679,7 +2159,8 @@ def build_parser():
     sp.add_argument("--ema_eval", action=argparse.BooleanOptionalAction, default=False)
     sp.set_defaults(func=cmd_train)
 
-    sp = sub.add_parser("eval")
+    # eval
+    sp = sub.add_parser("eval", help="Clip-level evaluation on validation split.")
     sp.add_argument("--proc_dir", required=True)
     sp.add_argument("--split_json", required=True)
     sp.add_argument("--ckpt", required=True)
@@ -1691,9 +2172,11 @@ def build_parser():
     sp.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     sp.add_argument("--device", type=str, default="auto")
     sp.add_argument("--mem_profile", type=str, default="balanced", choices=list(MEM_PROFILES.keys()))
+    sp.add_argument("--use_ema", action=argparse.BooleanOptionalAction, default=False, help="Load EMA weights if present in ckpt.")
     sp.set_defaults(func=cmd_eval)
 
-    sp = sub.add_parser("infer")
+    # infer
+    sp = sub.add_parser("infer", help="Embryo-level inference: sliding windows + t0_hat aggregation.")
     sp.add_argument("--ckpt", required=True)
     sp.add_argument("--input_path", required=True)
     sp.add_argument("--out_json", required=True)
@@ -1709,6 +2192,7 @@ def build_parser():
     sp.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     sp.add_argument("--device", type=str, default="auto")
     sp.add_argument("--mem_profile", type=str, default="balanced", choices=list(MEM_PROFILES.keys()))
+    sp.add_argument("--use_ema", action=argparse.BooleanOptionalAction, default=False, help="Load EMA weights if present in ckpt.")
     sp.set_defaults(func=cmd_infer)
 
     return p

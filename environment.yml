@@ -1,0 +1,15 @@
+name: embryo-tempoformer
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - matplotlib
+  - tifffile
+  - pillow
+  - torchvision
+  - pytorch
+  - pip
