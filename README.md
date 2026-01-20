@@ -14,7 +14,17 @@ This repository is designed for **paper-grade reproducibility**:
 
 # 中文说明（Chinese）
 
-## 1) 项目亮点（Highlights）
+## 1) 面向用户与审稿人：复现路径（推荐 Option B）
+本仓库提供两种复现路径：
+
+- **Option B（推荐、最快）**：下载 Zenodo 发布包（FULL processed + checkpoints + splits）→ 一键复现论文定量结果与图表  
+- **Option A（可选、更严格）**：从原始 OME‑TIFF 运行 `preprocess` 生成 processed →（可选训练）→ 推理 → 复现
+
+本 README 以 **Option B** 为主，同时提供 preprocess/训练/推理命令以便从原始数据开始复现。
+
+---
+
+## 2) 项目亮点（Highlights）
 - clip-based 多帧建模优于单帧基线，可稳定预测发育时间并进行消融对比  
 - temporal-difference consistency（同胚胎内差分一致性）提升轨迹自洽性（full vs nocons 因果对照）  
 - 外域 25°C 测试下 tempo 斜率 m 明显小于 1，可量化温度导致的发育变慢  
@@ -22,18 +32,18 @@ This repository is designed for **paper-grade reproducibility**:
 
 ---
 
-## 2) 目录结构
+## 3) 目录结构（你需要知道的）
 - `src/EmbryoTempoFormer.py`：主 CLI（preprocess / make_split / train / eval / infer）
 - `analysis/aggregate_kimmel.py`：聚合 per‑embryo infer JSON → `points.csv / embryo.csv / summary.json`
 - `analysis/ci_delta_m.py`：Δm embryo‑bootstrap 95% CI
 - `analysis/power_curve.py`：样本效率 power(E)（可选）
 - `analysis/make_figures_jobs.py`：顶刊风格 4 张图（PNG+PDF）
 - `analysis/vis_clip_saliency.py`：SmoothGrad 可解释性（可选，用于 Supplement）
-- `scripts/`：傻瓜式全链路脚本（从 infer 到出图）
+- `scripts/`：傻瓜式全链路脚本（infer → aggregate → CI/power → figures；可选热图）
 
 ---
 
-## 3) 安装（最小依赖）
+## 4) 安装（最小依赖）
 推荐在你自己的 conda 环境中安装：
 
 ```bash
@@ -48,17 +58,16 @@ conda activate embryo-tempoformer
 
 ---
 
-## 4) 复现（审稿人推荐：方案 B / Zenodo FULL processed）
+## 5) 快速复现（审稿人推荐：Option B / Zenodo FULL processed）
 我们推荐通过 Zenodo 提供的 **FULL processed + checkpoints + splits** 快速复现论文图表（无需从原始 TIFF 重新预处理）。
 
 - Zenodo bundle（FULL processed + checkpoints + splits + MANIFEST）：**DOI: <填你的 DOI>**
-- Raw data source：BioImage Archive S‑BIAD531
+- Raw data source：BioImage Archive S‑BIAD531（请在论文中按期刊要求引用）
 
-### 4.1 下载并解压 Zenodo 包
-将 Zenodo 包解压到任意目录，例如：
-- `./data_release/`
+### 5.1 下载并解压 Zenodo 包
+将 Zenodo 包解压到任意目录，例如：`./data_release/`
 
-解压后建议目录形态如下：
+解压后建议目录形态如下（示例）：
 ```text
 data_release/
 ├─ processed_28C5/
@@ -73,14 +82,14 @@ data_release/
    └─ full_best.pt
 ```
 
-### 4.2 配置 `.env`
+### 5.2 配置 `.env` 并检查路径
 ```bash
 cp .env.example .env
 # 编辑 .env：将 PROC_28C5/PROC_25C/SPLIT_*/CKPT_* 指向 data_release 下对应路径
 bash scripts/00_check_env.sh
 ```
 
-### 4.3 一键复现（infer → aggregate → CI/power → figures）
+### 5.3 一键复现论文定量结果（infer → aggregate → CI/power → figures）
 ```bash
 bash scripts/reproduce_all.sh
 ```
@@ -91,9 +100,48 @@ bash scripts/reproduce_all.sh
 最终 4 张图在：
 - `runs/paper_eval_YYYYMMDD_HHMMSS/figures_jobs/`（PNG + PDF）
 
+### 5.4（可选）在同一次全流程中自动生成热图（SmoothGrad）
+默认情况下，`scripts/reproduce_all.sh` 只复现论文定量结果（infer → aggregate → CI/power → figures），**不会**自动跑热图（热图较慢，属于 Supplement 的定性解释）。
+
+如需在同一次全流程中同时生成 SmoothGrad 热图，请设置环境变量：
+
+```bash
+RUN_SALIENCY=1 bash scripts/reproduce_all.sh
+```
+
+可选：指定用于热图的模型（默认 full）：
+
+```bash
+RUN_SALIENCY=1 SALIENCY_MODEL=full bash scripts/reproduce_all.sh
+# 也可用：nocons / meanpool / cnn_single
+```
+
+热图输出会写入本次 OUTROOT 目录下，例如：
+- `runs/paper_eval_YYYYMMDD_HHMMSS/vis_best_<EID>_<MODEL>_smoothgrad_five/`
+
+> 说明：以上开关依赖 `scripts/reproduce_all.sh` 已集成 saliency 步骤（本仓库已提供对应脚本 `scripts/50_saliency_best_id28c5.sh`）。
+
 ---
 
-## 5)（可选）从原始 OME‑TIFF 生成 processed `.npy`
+## 6)（可选）单独生成可解释性热图（SmoothGrad）
+如果不想在全流程中跑，也可以在完成 `reproduce_all.sh` 后单独运行：
+
+### 6.1 对 28.5°C test 中“表现最好”的胚胎生成热图（推荐）
+该脚本会在 **ID28C5_TEST/full** 的 `embryo.csv` 中选择 `rmse_resid` 最小的胚胎（最稳定），并对其生成五段 clip（前/前中/中/中后/后）的 SmoothGrad 热图。
+
+```bash
+bash scripts/50_saliency_best_id28c5.sh
+```
+
+### 6.2 指定 OUTROOT + 模型
+```bash
+bash scripts/50_saliency_best_id28c5.sh ./runs/paper_eval_YYYYMMDD_HHMMSS full
+bash scripts/50_saliency_best_id28c5.sh ./runs/paper_eval_YYYYMMDD_HHMMSS nocons
+```
+
+---
+
+## 7)（可选）从原始 OME‑TIFF 生成 processed `.npy`（Option A）
 如果需要从原始数据开始复现 processed，可使用 ETF 的 `preprocess` 子命令：
 
 ```bash
@@ -112,7 +160,7 @@ python3 src/EmbryoTempoFormer.py preprocess \
 
 ---
 
-## 6) ETF CLI 子命令总结（预处理 / 训练 / 推理）
+## 8) ETF CLI 子命令总结（预处理 / 训练 / 推理）
 本节汇总 `src/EmbryoTempoFormer.py` 的全部子命令。任何参数都可通过 `-h` 查看：
 
 ```bash
@@ -124,11 +172,11 @@ python3 src/EmbryoTempoFormer.py eval -h
 python3 src/EmbryoTempoFormer.py infer -h
 ```
 
-### 6.1 preprocess：原始 TIFF/OME‑TIFF → processed `.npy`
-**用途**：将原始 time‑lapse stack 预处理为固定形状 uint8 `.npy`。  
+### 8.1 preprocess：原始 TIFF/OME‑TIFF → processed `.npy`
+用途：将原始 time‑lapse stack 预处理为固定形状 uint8 `.npy`。  
 处理包括：percentile clipping → 双线性 resize 到正方形 → pad/trim 到 `expect_t` 帧。
 
-**命令模板：**
+命令模板：
 ```bash
 python3 src/EmbryoTempoFormer.py preprocess \
   --in_dir   /ABS/PATH/raw_tiffs \
@@ -140,13 +188,13 @@ python3 src/EmbryoTempoFormer.py preprocess \
   --limit 0
 ```
 
-### 6.2 make_split：生成 train/val/test split
-**用途**：扫描 `proc_dir/*.npy` 并写出 split JSON：
+### 8.2 make_split：生成 train/val/test split
+用途：扫描 `proc_dir/*.npy` 并写出 split JSON：
 ```json
 {"train":[...], "val":[...], "test":[...]}
 ```
 
-**命令模板：**
+命令模板：
 ```bash
 python3 src/EmbryoTempoFormer.py make_split \
   --proc_dir /ABS/PATH/processed_dir \
@@ -156,12 +204,12 @@ python3 src/EmbryoTempoFormer.py make_split \
   --seed 42
 ```
 
-### 6.3 train：训练（pair sampling + temporal-difference consistency）
-**用途**：训练 clip‑based 模型预测发育时间（hpf）。训练以同一胚胎内成对窗口为单位：
+### 8.3 train：训练（pair sampling + temporal-difference consistency）
+用途：训练 clip‑based 模型预测发育时间（hpf）。训练以同一胚胎内成对窗口为单位：
 - `lambda_abs`：绝对回归项  
 - `lambda_diff`：时间差一致性项（SmoothL1），并通过 `cons_ramp_ratio` 线性 warm‑up
 
-**full 模型示例命令：**
+full 模型示例命令：
 ```bash
 python3 src/EmbryoTempoFormer.py train \
   --proc_dir   /ABS/PATH/processed_28C5 \
@@ -187,17 +235,17 @@ python3 src/EmbryoTempoFormer.py train \
   --seed 42 --device auto
 ```
 
-**四模型消融（论文一致）：**
-- **cnn_single**：`--temporal_mode identity --model_depth 0`
-- **meanpool**：`--temporal_mode meanpool --model_depth 0`
-- **nocons**：`--temporal_mode transformer --model_depth 4 --lambda_diff 0`
-- **full**：`--temporal_mode transformer --model_depth 4 --lambda_diff 1`
+四模型消融（论文一致）：
+- cnn_single：`--temporal_mode identity --model_depth 0`
+- meanpool：`--temporal_mode meanpool --model_depth 0`
+- nocons：`--temporal_mode transformer --model_depth 4 --lambda_diff 0`
+- full：`--temporal_mode transformer --model_depth 4 --lambda_diff 1`
 
-### 6.4 eval：验证集 clip-level 指标（训练监控用）
-**用途**：在 val split 上做 clip‑level 评估（用于训练监控/保存 best）。  
+### 8.4 eval：验证集 clip-level 指标（训练监控用）
+用途：在 val split 上做 clip‑level 评估（用于训练监控/保存 best）。  
 注意：clip-level 窗口在同一胚胎内高度相关，不应用作论文推断结论的统计单位。
 
-**命令模板：**
+命令模板：
 ```bash
 python3 src/EmbryoTempoFormer.py eval \
   --proc_dir   /ABS/PATH/processed_28C5 \
@@ -210,11 +258,11 @@ python3 src/EmbryoTempoFormer.py eval \
   --use_ema
 ```
 
-### 6.5 infer：单胚胎滑窗推理（输出 per-embryo JSON）
-**用途**：对单个 `.npy`（或 `.tif/.tiff`）做滑窗推理，输出 JSON（包含 `starts` 与 `t0_hats`）。  
+### 8.5 infer：单胚胎滑窗推理（输出 per-embryo JSON）
+用途：对单个 `.npy`（或 `.tif/.tiff`）做滑窗推理，输出 JSON（包含 `starts` 与 `t0_hats`）。  
 论文后续 tempo 拟合与统计分析主要使用 `starts + t0_hats`。
 
-**命令模板：**
+命令模板：
 ```bash
 python3 src/EmbryoTempoFormer.py infer \
   --ckpt /ABS/PATH/best.pt \
@@ -231,16 +279,13 @@ python3 src/EmbryoTempoFormer.py infer \
 
 ---
 
-## 7) scripts 一键工作流（推荐）
-我们提供一键脚本串联：
-- infer → aggregate → CI/power → figures
-
+## 9) scripts 一键工作流与输出（runs/paper_eval_*/）
+运行：
 ```bash
 bash scripts/reproduce_all.sh
 ```
 
-### 输出说明（runs/paper_eval_*/）
-`runs/paper_eval_YYYYMMDD_HHMMSS/` 下的关键文件：
+`runs/paper_eval_YYYYMMDD_HHMMSS/` 下关键文件：
 - `ID28C5_TEST/<model>/json/*.json`：per-embryo infer 输出（每胚胎一个）
 - `ID28C5_TEST/<model>/{points.csv,embryo.csv,summary.json}`：聚合后的表与指标
 - `EXT25C_TEST/<model>/{points.csv,embryo.csv,summary.json}`：外域聚合
@@ -250,43 +295,51 @@ bash scripts/reproduce_all.sh
 
 ---
 
-## 8) 指标解释（避免外域误读）
-- **ID（28.5°C）**：`summary.json` 的 `global_metrics_points.mae/rmse/r2` 可作为点级准确度参考。
-- **External（25°C）**：相对名义时钟 `y=x` 的 MAE/RMSE 主要反映温度导致的系统性延缓累积，不应作为外域 accuracy 主结论；外域对比建议报告：
+## 10) 指标解释（避免外域误读）
+- ID（28.5°C）：`summary.json` 的 `global_metrics_points.mae/rmse/r2` 可作为点级准确度参考。
+- External（25°C）：相对名义时钟 `y=x` 的 MAE/RMSE 主要反映温度导致的系统性延缓累积，不应作为外域 accuracy 主结论；外域对比建议报告：
   - `m_anchor`（tempo 斜率，<1 表示变慢）
   - `rmse_resid`（拟合残差散布，越小越稳定）
   - `max_abs_resid`（最坏离群，长尾/坏孔敏感）
 
 ---
 
-## 9) 预处理说明（发布口径）
+## 11) 预处理说明（发布口径）
 预处理将每帧图像通过双线性插值缩放至 384×384 以统一输入尺寸（PIL resize, bilinear）。在靠近视野边界且存在裁切的样本中，缩放插值在边界处可能强化边缘效应并引入几何形变；这类影响主要表现为残差长尾，因此本文报告胚胎级汇总与残差诊断以减轻少量异常窗口对总体结论的影响。
 
 ---
 
-## 10) License
+## 12) License
 MIT（见 LICENSE）。
 
 ---
 
 # English README
 
-## 1) Highlights
+## 1) Reproducibility for users and reviewers (two paths)
+We provide two reproduction paths:
+
+- **Option B (recommended, fastest):** Zenodo bundle with **FULL processed arrays + checkpoints + splits** → one-command reproduction  
+- **Option A (optional, stricter):** preprocess from raw OME‑TIFF → (optional training) → inference → reproduction
+
+This README prioritizes Option B for reviewers while still providing preprocessing/training/inference commands.
+
+## 2) Highlights
 - Clip-based time-lapse modeling improves performance over single-frame baselines  
 - Temporal-difference consistency reduces trajectory scatter (causal ablation: full vs nocons)  
 - External 25°C testing yields tempo slopes m < 1, quantifying temperature-induced slowdown  
 - Embryo-level bootstrap confidence intervals provide rigorous uncertainty for Δm
 
-## 2) Repository layout
+## 3) Repository layout
 - `src/EmbryoTempoFormer.py`: main CLI (preprocess / make_split / train / eval / infer)
 - `analysis/aggregate_kimmel.py`: infer JSON → points/embryo/summary
 - `analysis/ci_delta_m.py`: embryo-bootstrap CI for Δm
 - `analysis/power_curve.py`: sample efficiency (optional)
 - `analysis/make_figures_jobs.py`: publication figures (PNG+PDF)
 - `analysis/vis_clip_saliency.py`: SmoothGrad interpretability (optional)
-- `scripts/`: one-command end-to-end workflow
+- `scripts/`: end-to-end workflow (optional saliency step)
 
-## 3) Install
+## 4) Install
 ```bash
 pip install -r requirements.txt
 ```
@@ -297,14 +350,14 @@ conda env create -f environment.yml
 conda activate embryo-tempoformer
 ```
 
-## 4) Reproducibility (recommended for reviewers: Option B / Zenodo FULL processed)
+## 5) Reproducibility (recommended: Option B / Zenodo FULL processed)
 We recommend reproducing paper results using a Zenodo bundle containing **FULL processed arrays + checkpoints + splits**.
 
 - Zenodo bundle (FULL processed + checkpoints + splits + MANIFEST): **DOI: <fill DOI>**
 - Raw data source: BioImage Archive S‑BIAD531
 
-### 4.1 Download and extract the Zenodo bundle
-Extract the bundle into any directory, e.g. `./data_release/`.
+### 5.1 Download and extract the Zenodo bundle
+Extract into any directory, e.g. `./data_release/`.
 
 Expected layout:
 ```text
@@ -321,21 +374,49 @@ data_release/
    └─ full_best.pt
 ```
 
-### 4.2 Configure `.env`
+### 5.2 Configure `.env` and verify paths
 ```bash
 cp .env.example .env
 # edit .env: PROC_*/SPLIT_*/CKPT_* to point into data_release/
 bash scripts/00_check_env.sh
 ```
 
-### 4.3 One-command reproduction
+### 5.3 One-command reproduction (infer → aggregate → CI/power → figures)
 ```bash
 bash scripts/reproduce_all.sh
 ```
 
 Outputs are written to `runs/paper_eval_YYYYMMDD_HHMMSS/` (final figures in `figures_jobs/`).
 
-## 5) (Optional) Preprocess from raw OME‑TIFF to processed `.npy`
+### 5.4 (Optional) Run saliency within the full pipeline
+By default, `scripts/reproduce_all.sh` reproduces quantitative results only and **does not** run saliency (qualitative and slow).
+
+To run SmoothGrad saliency in the same end-to-end run, set:
+```bash
+RUN_SALIENCY=1 bash scripts/reproduce_all.sh
+```
+
+Optionally choose the model for saliency (default: `full`):
+```bash
+RUN_SALIENCY=1 SALIENCY_MODEL=full bash scripts/reproduce_all.sh
+# also supports: nocons / meanpool / cnn_single
+```
+
+Saliency outputs are written under the current OUTROOT, e.g.:
+`runs/paper_eval_YYYYMMDD_HHMMSS/vis_best_<EID>_<MODEL>_smoothgrad_five/`
+
+## 6) (Optional) SmoothGrad saliency (standalone)
+If you prefer to run saliency separately after `reproduce_all.sh`:
+```bash
+bash scripts/50_saliency_best_id28c5.sh
+```
+Or specify OUTROOT and model:
+```bash
+bash scripts/50_saliency_best_id28c5.sh ./runs/paper_eval_YYYYMMDD_HHMMSS full
+bash scripts/50_saliency_best_id28c5.sh ./runs/paper_eval_YYYYMMDD_HHMMSS nocons
+```
+
+## 7) (Optional) Preprocess from raw OME‑TIFF to processed `.npy` (Option A)
 ```bash
 python3 src/EmbryoTempoFormer.py preprocess \
   --in_dir   /ABS/PATH/raw_ome_tiffs \
@@ -346,7 +427,7 @@ python3 src/EmbryoTempoFormer.py preprocess \
   --max_pages 0
 ```
 
-## 6) ETF CLI subcommands (preprocess / train / infer)
+## 8) ETF CLI subcommands (preprocess / train / infer)
 List help:
 ```bash
 python3 src/EmbryoTempoFormer.py -h
@@ -357,52 +438,20 @@ python3 src/EmbryoTempoFormer.py eval -h
 python3 src/EmbryoTempoFormer.py infer -h
 ```
 
-### 6.1 preprocess
-Converts raw TIFF/OME‑TIFF stacks into fixed-shape uint8 `.npy`:
-- percentile clipping (`p_lo/p_hi`)
-- bilinear resize to `img_size × img_size` (default 384×384)
-- pad/trim along time to `expect_t` frames (default 192)
-
-### 6.2 make_split
-Scans `proc_dir/*.npy` and writes:
-```json
-{"train":[...], "val":[...], "test":[...]}
-```
-
-### 6.3 train
-Trains a clip-based model using within-embryo pair sampling and an optional temporal-difference consistency loss.
-Ablations (paper):
-- cnn_single: `--temporal_mode identity --model_depth 0`
-- meanpool:   `--temporal_mode meanpool --model_depth 0`
-- nocons:     `--temporal_mode transformer --model_depth 4 --lambda_diff 0`
-- full:       `--temporal_mode transformer --model_depth 4 --lambda_diff 1`
-
-### 6.4 eval
-Clip-level validation metrics for training monitoring (note: windows are correlated within embryo).
-
-### 6.5 infer
-Embryo-level inference using sliding windows, producing per-embryo JSON with `starts` and `t0_hats`.
-Downstream tempo fitting and statistics use `starts + t0_hats`.
-
-## 7) End-to-end scripts (recommended)
-Run:
-```bash
-bash scripts/reproduce_all.sh
-```
-
+## 9) End-to-end outputs
 Key outputs under `runs/paper_eval_*/`:
 - per-embryo `json/*.json`
 - aggregated `points.csv`, `embryo.csv`, `summary.json`
 - bootstrap `CI_*.json`
 - final figures in `figures_jobs/` (PNG+PDF)
 
-## 8) Metric notes
+## 10) Metric notes
 - ID (28.5°C): pointwise MAE/RMSE/R² can be interpreted as accuracy.
 - External (25°C): pointwise MAE/RMSE vs nominal clock `y=x` mainly reflects true temperature-induced delay; primary external readouts are `m_anchor`, `rmse_resid`, and `max_abs_resid`.
 
-## 9) Preprocessing note
+## 11) Preprocessing note
 Frames are resized to 384×384 via bilinear interpolation. For embryos near the field-of-view boundary, interpolation may accentuate boundary artifacts and geometric distortion; we report embryo-level summaries and residual diagnostics to mitigate the influence of rare outlier windows.
 
-## 10) License
+## 12) License
 MIT (see LICENSE).
 ```
