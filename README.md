@@ -14,13 +14,13 @@ This repository is designed for **paper-grade reproducibility**:
 
 # 中文说明（面向科研人员与审稿人）
 
-## 1) 面向用户与审稿人：复现路径（两种）
+## 1) 复现路径概览（两种路径）
 本仓库提供两种复现路径：
 
 - **Option B（推荐、最快、审稿人友好）**：下载 Zenodo 发布包（FULL processed + checkpoints + splits + 校验文件）→ 一键复现论文定量结果与图表  
 - **Option A（可选、更严格）**：从原始 OME‑TIFF 运行 `preprocess` 生成 processed →（可选训练）→ 推理 → 复现
 
-本 README 以 **Option B** 为主，同时提供 preprocess/训练/推理命令以便从原始数据开始复现。
+本 README 以 **Option B** 为主，同时提供 preprocess/训练/推理命令，以便从原始数据开始复现。
 
 ---
 
@@ -44,8 +44,6 @@ This repository is designed for **paper-grade reproducibility**:
 ---
 
 ## 4) 安装（最小依赖）
-推荐在你自己的 conda 环境中安装：
-
 ```bash
 pip install -r requirements.txt
 ```
@@ -58,31 +56,26 @@ conda activate embryo-tempoformer
 
 ---
 
-## 5) 快速复现（审稿人推荐：Option B / Zenodo FULL processed）【从下载到开始使用】
+## 5) Option B：Zenodo FULL processed（从下载到开始使用，一条链路打通）
 我们推荐通过 Zenodo 提供的 **FULL processed + checkpoints + splits + 校验文件** 快速复现论文图表（无需从原始 TIFF 重新预处理）。
 
-- Zenodo bundle（FULL processed + checkpoints + splits + MANIFEST）：**DOI: <ZENODO_DOI>**
-- Zenodo record 页面：`<ZENODO_RECORD_URL>`
-- 原始数据来源：BioImage Archive S‑BIAD531（论文中请按期刊要求引用）
+- Zenodo DOI：**https://doi.org/10.5281/zenodo.18318139**
+- 建议下载的发布包文件名：`embryo-tempoformer_release_v1_full.tar.gz`
 
-### 5.1 下载
-Zenodo 发布包文件名（建议）：
+### 5.1 下载（Download）
+由于不同网络环境可能对 Zenodo 直链有差异，推荐从 DOI 页面进入 record 再下载文件：
+- https://doi.org/10.5281/zenodo.18318139
+
+下载完成后，你应得到：
 - `embryo-tempoformer_release_v1_full.tar.gz`
 
-下载方式二选一：
-- 浏览器：打开 Zenodo record 页面下载该文件
-- 命令行（将 URL 替换为 Zenodo 上实际文件链接）：
-```bash
-wget -O embryo-tempoformer_release_v1_full.tar.gz "<ZENODO_FILE_URL>"
-```
-
-### 5.2 校验（推荐）
+### 5.2 校验（Verify，推荐）
 ```bash
 ls -lh embryo-tempoformer_release_v1_full.tar.gz
 tar -tzf embryo-tempoformer_release_v1_full.tar.gz | head -n 20
 ```
 
-### 5.3 解压
+### 5.3 解压（Extract）
 ```bash
 tar -xzf embryo-tempoformer_release_v1_full.tar.gz
 ```
@@ -90,7 +83,7 @@ tar -xzf embryo-tempoformer_release_v1_full.tar.gz
 解压后会得到目录（包内真实顶层目录名）：
 - `embryo-tempoformer_release_v1/`
 
-结构应包含：
+该目录结构应包含：
 ```text
 embryo-tempoformer_release_v1/
 ├─ processed_28C5/
@@ -108,7 +101,7 @@ sha256sum -c SHA256SUMS.txt
 cd ..
 ```
 
-### 5.4 配置代码仓库并运行（复现论文定量结果）
+### 5.4 配置仓库并运行（复现论文定量结果）
 1) 克隆本仓库并安装依赖：
 ```bash
 git clone <GITHUB_REPO_URL>
@@ -116,7 +109,7 @@ cd s-biad531-embryo-tempoformer
 pip install -r requirements.txt
 ```
 
-2) 配置 `.env` 指向解压目录（推荐用 REL 一次性定义方式）：
+2) 配置 `.env` 指向解压目录（推荐用 REL 一次性定义方式）
 
 > 注意：Linux 的 `sed -i` 可直接用；macOS 请改为 `sed -i ''` 或手动编辑 `.env`。
 
@@ -155,14 +148,12 @@ bash scripts/reproduce_all.sh
 ### 5.5（可选）在同一次全流程中自动生成热图（SmoothGrad）
 默认情况下，`scripts/reproduce_all.sh` 只复现论文定量结果，**不会**自动跑热图（热图较慢，属于 Supplement 的定性解释）。
 
-如需在同一次全流程中同时生成 SmoothGrad 热图，请设置环境变量：
-
+如需在同一次全流程中同时生成 SmoothGrad 热图：
 ```bash
 RUN_SALIENCY=1 bash scripts/reproduce_all.sh
 ```
 
 可选：指定用于热图的模型（默认 full）：
-
 ```bash
 RUN_SALIENCY=1 SALIENCY_MODEL=full bash scripts/reproduce_all.sh
 # 也可用：nocons / meanpool / cnn_single
@@ -188,9 +179,7 @@ bash scripts/50_saliency_best_id28c5.sh ./runs/paper_eval_YYYYMMDD_HHMMSS nocons
 
 ---
 
-## 7)（可选）从原始 OME‑TIFF 生成 processed `.npy`（Option A）
-如果需要从原始数据开始复现 processed，可使用 ETF 的 `preprocess` 子命令：
-
+## 7)（可选）Option A：从原始 OME‑TIFF 生成 processed `.npy`
 ```bash
 python3 src/EmbryoTempoFormer.py preprocess \
   --in_dir   /ABS/PATH/raw_ome_tiffs \
@@ -201,15 +190,10 @@ python3 src/EmbryoTempoFormer.py preprocess \
   --max_pages 0
 ```
 
-输出目录会包含：
-- 每个样本一个 `.npy`（uint8，shape=[T,H,W]，T=192，H=W=384）
-- `preprocess_meta.json`
-
 ---
 
-## 8) ETF CLI 子命令总结（预处理 / 训练 / 推理）
-本节汇总 `src/EmbryoTempoFormer.py` 的全部子命令。任何参数都可通过 `-h` 查看：
-
+## 8) ETF CLI 子命令（速查）
+查看帮助：
 ```bash
 python3 src/EmbryoTempoFormer.py -h
 python3 src/EmbryoTempoFormer.py preprocess -h
@@ -219,121 +203,11 @@ python3 src/EmbryoTempoFormer.py eval -h
 python3 src/EmbryoTempoFormer.py infer -h
 ```
 
-### 8.1 preprocess：原始 TIFF/OME‑TIFF → processed `.npy`
-用途：将原始 time‑lapse stack 预处理为固定形状 uint8 `.npy`。  
-处理包括：percentile clipping → 双线性 resize 到正方形 → pad/trim 到 `expect_t` 帧。
-
-命令模板：
-```bash
-python3 src/EmbryoTempoFormer.py preprocess \
-  --in_dir   /ABS/PATH/raw_tiffs \
-  --proc_dir /ABS/PATH/processed_dir \
-  --expect_t 192 \
-  --img_size 384 \
-  --p_lo 1 --p_hi 99 \
-  --max_pages 0 \
-  --limit 0
-```
-
-### 8.2 make_split：生成 train/val/test split
-用途：扫描 `proc_dir/*.npy` 并写出 split JSON：
-```json
-{"train":[...], "val":[...], "test":[...]}
-```
-
-命令模板：
-```bash
-python3 src/EmbryoTempoFormer.py make_split \
-  --proc_dir /ABS/PATH/processed_dir \
-  --out_json /ABS/PATH/split.json \
-  --val_ratio 0.15 \
-  --test_ratio 0.15 \
-  --seed 42
-```
-
-### 8.3 train：训练（pair sampling + temporal-difference consistency）
-用途：训练 clip‑based 模型预测发育时间（hpf）。训练以同一胚胎内成对窗口为单位：
-- `lambda_abs`：绝对回归项  
-- `lambda_diff`：时间差一致性项（SmoothL1），并通过 `cons_ramp_ratio` 线性 warm‑up
-
-full 模型示例命令：
-```bash
-python3 src/EmbryoTempoFormer.py train \
-  --proc_dir   /ABS/PATH/processed_28C5 \
-  --split_json /ABS/PATH/split/28C5.json \
-  --out_dir    runs/EXP_full \
-  --epochs 300 \
-  --batch_size 64 --val_batch_size 64 \
-  --num_workers 8 \
-  --samples_per_embryo 32 \
-  --jitter 2 \
-  --clip_len 24 --img_size 384 --expect_t 192 \
-  --temporal_mode transformer \
-  --model_dim 128 --model_depth 4 --model_heads 4 --model_mlp_ratio 2.0 \
-  --drop 0.1 --attn_drop 0.0 --temporal_drop_p 0.0 \
-  --cnn_base 24 --cnn_expand 2 --cnn_se_reduction 4 \
-  --lambda_abs 1.0 --lambda_diff 1.0 --cons_ramp_ratio 0.2 \
-  --abs_loss_type l1 \
-  --lr 6e-4 --weight_decay 0.01 --warmup_ratio 0.01 --lr_min_ratio 0.05 \
-  --max_grad_norm 1.0 --grad_accum 1 \
-  --mem_profile lowmem \
-  --amp \
-  --ema_decay 0.99 --ema_eval \
-  --seed 42 --device auto
-```
-
-四模型消融（论文一致）：
-- cnn_single：`--temporal_mode identity --model_depth 0`
-- meanpool：`--temporal_mode meanpool --model_depth 0`
-- nocons：`--temporal_mode transformer --model_depth 4 --lambda_diff 0`
-- full：`--temporal_mode transformer --model_depth 4 --lambda_diff 1`
-
-### 8.4 eval：验证集 clip-level 指标（训练监控用）
-用途：在 val split 上做 clip‑level 评估（用于训练监控/保存 best）。  
-注意：clip-level 窗口在同一胚胎内高度相关，不应用作论文推断结论的统计单位。
-
-命令模板：
-```bash
-python3 src/EmbryoTempoFormer.py eval \
-  --proc_dir   /ABS/PATH/processed_28C5 \
-  --split_json /ABS/PATH/split/28C5.json \
-  --ckpt       /ABS/PATH/best.pt \
-  --clip_len 24 --img_size 384 --expect_t 192 \
-  --batch_size 64 --num_workers 4 \
-  --mem_profile balanced \
-  --amp --device auto \
-  --use_ema
-```
-
-### 8.5 infer：单胚胎滑窗推理（输出 per-embryo JSON）
-用途：对单个 `.npy`（或 `.tif/.tiff`）做滑窗推理，输出 JSON（包含 `starts` 与 `t0_hats`）。  
-论文后续 tempo 拟合与统计分析主要使用 `starts + t0_hats`。
-
-命令模板：
-```bash
-python3 src/EmbryoTempoFormer.py infer \
-  --ckpt /ABS/PATH/best.pt \
-  --input_path /ABS/PATH/processed_dir/<eid>.npy \
-  --out_json runs/infer_json/<eid>.json \
-  --clip_len 24 --img_size 384 --expect_t 192 \
-  --stride 8 \
-  --trim 0.2 \
-  --batch_size 64 --num_workers 0 \
-  --mem_profile lowmem \
-  --amp --device auto \
-  --use_ema
-```
-
 ---
 
-## 9) scripts 一键工作流与输出（runs/paper_eval_*/）
-运行：
-```bash
-bash scripts/reproduce_all.sh
-```
-
+## 9) 关键输出说明（runs/paper_eval_*/）
 `runs/paper_eval_YYYYMMDD_HHMMSS/` 下关键文件：
-- `ID28C5_TEST/<model>/json/*.json`：per-embryo infer 输出（每胚胎一个）
+- `ID28C5_TEST/<model>/json/*.json`：per‑embryo infer 输出（每胚胎一个）
 - `ID28C5_TEST/<model>/{points.csv,embryo.csv,summary.json}`：聚合后的表与指标
 - `EXT25C_TEST/<model>/{points.csv,embryo.csv,summary.json}`：外域聚合
 - `CI_<model>_m_anchor.json`：Δm 的 95% CI（embryo-bootstrap）
@@ -369,7 +243,7 @@ We provide two reproduction paths:
 - **Option B (recommended, fastest, reviewer-friendly):** Zenodo bundle with **FULL processed arrays + checkpoints + splits + integrity checks** → one-command reproduction  
 - **Option A (optional, stricter):** preprocess from raw OME‑TIFF → (optional training) → inference → reproduction
 
-This README prioritizes Option B for reviewers while still providing preprocessing/training/inference commands.
+This README prioritizes Option B while still providing preprocessing/training/inference commands.
 
 ## 2) Highlights
 - Clip-based time-lapse modeling improves performance over single-frame baselines  
@@ -391,20 +265,15 @@ conda activate embryo-tempoformer
 ## 4) Option B: Zenodo FULL processed (download → verify → extract → run)
 We recommend a Zenodo bundle containing **FULL processed arrays + checkpoints + splits + integrity checks**.
 
-- Zenodo bundle DOI: **<ZENODO_DOI>**
-- Zenodo record page: `<ZENODO_RECORD_URL>`
-- Raw data source: BioImage Archive S‑BIAD531
+- Zenodo DOI: **https://doi.org/10.5281/zenodo.18318139**
+- Recommended bundle filename: `embryo-tempoformer_release_v1_full.tar.gz`
 
 ### 4.1 Download
-Bundle filename:
-- `embryo-tempoformer_release_v1_full.tar.gz`
+Download the archive from the Zenodo record page:
+- https://doi.org/10.5281/zenodo.18318139
 
-Download options:
-- Browser: download from the Zenodo record page
-- Command line (replace with the actual Zenodo file URL):
-```bash
-wget -O embryo-tempoformer_release_v1_full.tar.gz "<ZENODO_FILE_URL>"
-```
+After download you should have:
+- `embryo-tempoformer_release_v1_full.tar.gz`
 
 ### 4.2 Verify (recommended)
 ```bash
@@ -468,12 +337,16 @@ sed -i "s|^CKPT_FULL=.*|CKPT_FULL=$REL/checkpoints/full_best.pt|" .env
 bash scripts/00_check_env.sh
 ```
 
-4) One-command reproduction:
+4) One-command reproduction (infer → aggregate → CI/power → figures):
 ```bash
 bash scripts/reproduce_all.sh
 ```
 
-Outputs are written to `runs/paper_eval_YYYYMMDD_HHMMSS/` (final figures in `figures_jobs/`).
+The script prints the output root directory (OUTROOT), e.g.:
+- `runs/paper_eval_YYYYMMDD_HHMMSS/`
+
+Final figures:
+- `runs/paper_eval_YYYYMMDD_HHMMSS/figures_jobs/` (PNG + PDF)
 
 ## 5) (Optional) Saliency (SmoothGrad)
 Saliency is qualitative (supplement) and slow; it is not run by default.
@@ -488,9 +361,6 @@ Optionally choose the model for saliency (default: `full`):
 RUN_SALIENCY=1 SALIENCY_MODEL=full bash scripts/reproduce_all.sh
 # also supports: nocons / meanpool / cnn_single
 ```
-
-Saliency outputs are written under the current OUTROOT, e.g.:
-- `runs/paper_eval_YYYYMMDD_HHMMSS/vis_best_<EID>_<MODEL>_smoothgrad_five/`
 
 ### 5.2 Standalone saliency
 ```bash
