@@ -24,20 +24,6 @@ ckpt_of () {
   esac
 }
 
-run_set () {
-  local TAG="$1" PROC="$2" SPLIT="$3" KEY="$4" MODEL="$5" CKPT="$6"
-  local OUTDIR="$OUTROOT/$TAG/$MODEL/json"
-  mkdir -p "$OUTDIR"
-
-  echo "[RUN] $TAG $MODEL"
-  python3 - <<PY
-import json
-sp=json.load(open("$SPLIT","r"))
-for eid in sp["$KEY"]:
-    print(eid)
-PY
-}
-
 infer_one () {
   local PROC="$1" EID="$2" OUT="$3" CKPT="$4"
   local IN="$PROC/$EID.npy"

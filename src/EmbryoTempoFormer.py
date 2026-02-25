@@ -1875,10 +1875,6 @@ def trimmed_mean(x: Sequence[float], trim: float = 0.2) -> float:
     if 2 * k >= xs.size:
         return float(xs.mean())
     return float(xs[k:-k].mean())
-    k = int(trim * xs.size)
-    if 2 * k >= xs.size:
-        return float(np.mean(xs))
-    return float(np.mean(xs[k:-k]))
 
 
 @torch.no_grad()
