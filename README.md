@@ -79,12 +79,18 @@ cd ..
 
 ### Step 2 — Clone the repo and install dependencies
 
-**Option 2A: Docker (Easiest)**
-Skip Python installation entirely! Just pull the pre-built Docker image:
+**Option 2A: Docker (Easiest, no clone required)**
+Skip Python installation entirely!
+1. Pull the pre-built image:
 ```bash
 docker pull lijiayudeng/embryo-tempoformer:latest
 ```
-To run the pipeline inside the container, map your data directory to `/app/data` (or similar) when running `docker run`.
+2. Start an interactive container, mounting your extracted Zenodo data to `/data` inside the container:
+```bash
+# Replace /path/to/embryo-tempoformer_release_v1 with your actual absolute path
+docker run -it -v /path/to/embryo-tempoformer_release_v1:/data lijiayudeng/embryo-tempoformer:latest /bin/bash
+```
+3. Once inside the container (you will be in `/app`), proceed directly to **Step 3**, but use `/data/...` as the base for all absolute paths in your `.env`. Be sure to set `RUNS_DIR=/data/runs` so that the generated figures and CSVs are saved back to your host machine!
 
 **Option 2B: Local pip installation**
 ```bash
@@ -454,12 +460,18 @@ cd ..
 
 ### Step 2 — 克隆仓库并安装依赖
 
-**选项 2A: 使用 Docker (最省心)**
-你可以完全跳过 Python 和 CUDA 的安装，直接拉取我打包好的 Docker 镜像即可：
+**选项 2A: 使用 Docker (最省心，无需 clone 代码)**
+你可以完全跳过 Python 和 CUDA 的复杂安装：
+1. 拉取打包好的 Docker 镜像：
 ```bash
 docker pull lijiayudeng/embryo-tempoformer:latest
 ```
-运行容器时，请使用 `-v` 参数将你的数据目录挂载到容器内。
+2. 启动交互式容器，并使用 `-v` 将你解压好的 Zenodo 数据挂载到容器内的 `/data` 目录：
+```bash
+# 请将 /path/to/embryo-tempoformer_release_v1 替换为你实际的绝对路径
+docker run -it -v /path/to/embryo-tempoformer_release_v1:/data lijiayudeng/embryo-tempoformer:latest /bin/bash
+```
+3. 进入容器后（你将位于 `/app` 目录），请直接跳至 **Step 3** 继续。在配置 `.env` 文件时，请将所有绝对路径都指向 `/data/...`。同时**务必设置 `RUNS_DIR=/data/runs`**，这样跑出来的图表和结果才能保存回你自己的电脑上！
 
 **选项 2B: 本地 pip 安装**
 ```bash
