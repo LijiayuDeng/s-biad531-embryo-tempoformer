@@ -9,6 +9,7 @@ EmbryoTempoFormer (ETF) is a **paper-grade reproducible pipeline** for:
 **Links**
 - **Code repo:** https://github.com/LijiayuDeng/s-biad531-embryo-tempoformer
 - **Zenodo reproducibility bundle (FULL processed + checkpoints + splits):** https://doi.org/10.5281/zenodo.18318139
+- **Docker image (ready-to-use pipeline environment):** https://hub.docker.com/r/lijiayudeng/embryo-tempoformer
 - **Raw data source:** BioImage Archive accession **S-BIAD531**
   https://www.ebi.ac.uk/bioimage-archive/galleries/S-BIAD531.html
 
