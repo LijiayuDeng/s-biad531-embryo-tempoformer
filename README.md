@@ -77,6 +77,15 @@ cd ..
 ```
 
 ### Step 2 — Clone the repo and install dependencies
+
+**Option 2A: Docker (Easiest)**
+Skip Python installation entirely! Just pull the pre-built Docker image:
+```bash
+docker pull lijiayudeng/embryo-tempoformer:latest
+```
+To run the pipeline inside the container, map your data directory to `/app/data` (or similar) when running `docker run`.
+
+**Option 2B: Local pip installation**
 ```bash
 git clone https://github.com/LijiayuDeng/s-biad531-embryo-tempoformer.git
 cd s-biad531-embryo-tempoformer
@@ -443,6 +452,15 @@ cd ..
 ```
 
 ### Step 2 — 克隆仓库并安装依赖
+
+**选项 2A: 使用 Docker (最省心)**
+你可以完全跳过 Python 和 CUDA 的安装，直接拉取我打包好的 Docker 镜像即可：
+```bash
+docker pull lijiayudeng/embryo-tempoformer:latest
+```
+运行容器时，请使用 `-v` 参数将你的数据目录挂载到容器内。
+
+**选项 2B: 本地 pip 安装**
 ```bash
 git clone https://github.com/LijiayuDeng/s-biad531-embryo-tempoformer.git
 cd s-biad531-embryo-tempoformer
