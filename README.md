@@ -176,6 +176,10 @@ Under `runs/paper_eval_YYYYMMDD_HHMMSS/`:
 - `CI_<model>_m_anchor.json` — embryo-bootstrap 95% CI for delta-m (computed from `embryo.csv`)
 - `power_<model>_m_anchor.csv` — power curve data
 - `power_<model>_m_anchor.png` — power curve figure
+- `continuous_power/continuous_power_by_model.csv` — continuous effect-size power surface (optional)
+- `continuous_power/continuous_thresholds_by_model.csv` — E80/E90/E95 threshold curves over `|delta m|`
+- `continuous_power/continuous_E80_by_model.svg` — all-model E80 curve
+- `continuous_power/continuous_full_E80_E90_E95.svg` — full-model E80/E90/E95 curves
 
 **Figures**
 - `figures_jobs/` — publication figures (PNG + PDF)
@@ -184,6 +188,54 @@ Under `runs/paper_eval_YYYYMMDD_HHMMSS/`:
 - `OUTROOT.txt` — records OUTROOT path (written by `scripts/10_infer_all.sh`)
 
 Models (`<model>`): `cnn_single`, `meanpool`, `nocons`, `full`.
+
+---
+
+## Optional: Continuous effect-size planning curve
+
+This extends sample-efficiency analysis from discrete effect bins to a continuous range.
+
+Default dense setup used for revision:
+- `|delta m| = 0.00 .. 0.10` with step `0.002`
+- Targets: `E80` / `E90` / `E95`
+- Shape constraints (enabled by default):
+  - power should be non-decreasing with larger `E`
+  - required `E` should be non-increasing with larger `|delta m|`
+
+Statistical definition:
+- `delta m = mean(m_anchor, A) - mean(m_anchor, B)`
+- default `A=EXT25C_TEST`, `B=ID28C5_TEST`
+- detection rule: embryo-bootstrap 95% CI excludes 0
+
+```bash
+python analysis/power_curve_continuous.py \
+  --outroot runs/paper_eval_20260225_232506 \
+  --out_dir runs/paper_eval_20260225_232506/continuous_power \
+  --models cnn_single,meanpool,nocons,full \
+  --E_list 2,3,4,6,8,10,12,14,16,18,20,22 \
+  --delta_max 0.10 \
+  --delta_step 0.002 \
+  --R 1200 \
+  --B_boot 800 \
+  --seed 20260310 \
+  --y_min_plot 0 \
+  --y_max_plot 23 \
+  --y_tick_step 1 \
+  --enforce_monotone_power_e 1 \
+  --enforce_monotone_threshold_delta 1
+```
+
+Outputs under `--out_dir`:
+- `continuous_power_by_model.csv` — full power surface (`power` + `power_raw`)
+- `continuous_thresholds_by_model.csv` — threshold curves (`E80/E90/E95`)
+- `continuous_E80_by_model.svg` — all-model E80 curve
+- `continuous_full_E80_E90_E95.svg` — full-model E80/E90/E95 curves
+
+Plot notes:
+- Curves are drawn with monotone cubic smoothing for readability.
+- Markers remain the actual grid-point values.
+- Axis display can start at 0, but inferentially valid designs still follow `E_list` (typically `E>=2`).
+- Near-zero `|delta m|` may show `>max(E_list)` (rendered as gaps).
 
 ---
 
