@@ -30,6 +30,7 @@ EmbryoTempoFormer (ETF) is a **paper-grade reproducible pipeline** for:
 - [Optional: Training specification (EXP4; from checkpoint cfg)](#optional-training-specification-exp4-from-checkpoint-cfg)
 - [Optional: Option A (preprocess from raw OME-TIFF)](#optional-option-a-preprocess-from-raw-ome-tiff)
 - [ETF CLI quick reference](#etf-cli-quick-reference)
+- [Representative Hardware / Runtime](#representative-hardware--runtime)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -812,6 +813,58 @@ python3 src/EmbryoTempoFormer.py infer -h
 
 ---
 
+## Representative Hardware / Runtime
+
+The released checkpoints are sufficient for paper reproduction; retraining is
+not required for the main ETF results. For practical accessibility, the table
+below reports representative single-machine runs used in this revision.
+
+Original released checkpoint training was performed under a substantially
+heavier setup than the single-GPU examples below:
+
+| Context | Hardware / memory profile |
+|---|---|
+| Original released checkpoint training | `4 × RTX 3090` with DDP; the released checkpoints themselves were trained under `mem_profile=lowmem`, and in the original runs per-GPU memory usage was typically around `13-15 GB`; higher-memory profiles were not practical at the original batch/clip settings |
+| Princeton inference / low-shot adaptation reported in this revision | single `RTX 4060 Laptop GPU` (`8188 MiB`) using `AMP=1` and `mem_profile=lowmem` |
+
+| Task | Representative configuration | Runtime | Peak GPU memory |
+|---|---|---:|---:|
+| Princeton zero-shot external inference | `2` datasets × `4` models × `96` embryos = `768` embryo-model jobs | `50.5 min` total (`3.95 s/job`) | single-GPU inference on `RTX 4060 Laptop (8188 MiB)` |
+| Low-shot fine-tuning: `cnn_single + ft12 + frame_tail1` | `batch_size=32`, `val_batch_size=64`, `clip_len=24`, `AMP=1`, `mem_profile=lowmem` | `73.7 s/epoch` | `3.66 GB` |
+| Low-shot fine-tuning: `full + ft12 + temporal_last1` | `batch_size=16`, `val_batch_size=32`, `clip_len=24`, `AMP=1`, `mem_profile=lowmem` | `135.7 s/epoch` | `5.15 GB` |
+
+Representative hardware used for the above measurements:
+
+- GPU: `NVIDIA GeForce RTX 4060 Laptop GPU` (`8188 MiB`)
+- CPU: `13th Gen Intel Core i7-13650HX` (`20` logical CPUs; `10` cores / `20` threads)
+- RAM: `15 GiB`
+
+`lowmem` is not a vague label; in code it specifically changes the memory
+profile from the default balanced path as follows:
+
+| Setting | `balanced` | `lowmem` | Effect |
+|---|---:|---:|---|
+| `frame_chunk` | `8` | `4` | fewer frames encoded per CNN call |
+| `ckpt_frame` | `False` | `True` | checkpoint the **whole frame encoder per chunk** |
+| `ckpt_cnn` | `True` | `False` | rely on whole-frame checkpointing rather than additional intra-CNN checkpoint segmentation |
+| `ckpt_segments` | `2` | `1` | simplified low-memory checkpoint path |
+
+Under the same `full + temporal_last1` low-shot fine-tuning setup, the memory
+profiles behaved as follows on the `RTX 4060 Laptop GPU`:
+
+| Memory profile | Runtime / epoch | Peak GPU memory | Practical note |
+|---|---:|---:|---|
+| `ultra` | `142.9 s` | `2.31 GB` | lowest memory, most aggressive compute-for-memory tradeoff |
+| `lowmem` | `145.5 s` | `5.12 GB` | practical compromise; this is the released training profile |
+| `balanced` | `251.7 s` | `8.80 GB` | nearly saturates an `8 GB`-class laptop GPU |
+| `fast` | no completed representative epoch on the `8 GB` laptop probe | effectively at/near device limit | not practical on this class of hardware for the matched configuration |
+
+These values are intended as concrete reference points rather than strict
+requirements; exact timings will vary across hardware, storage, and software
+stacks.
+
+---
+
 ## Troubleshooting
 
 - **Windows:** workflow scripts are `bash` scripts; use WSL (recommended) or Linux/macOS.
@@ -844,6 +897,7 @@ MIT (see LICENSE).
 - 可选：训练规格（EXP4；以 checkpoint cfg 为准）
 - 可选：Option A（从原始 OME-TIFF 预处理）
 - ETF CLI 速查
+- 代表性硬件 / 耗时
 - 常见问题
 - 许可证
 
@@ -1397,6 +1451,51 @@ python3 src/EmbryoTempoFormer.py train -h
 python3 src/EmbryoTempoFormer.py eval -h
 python3 src/EmbryoTempoFormer.py infer -h
 ```
+
+---
+
+## 代表性硬件 / 耗时
+
+论文主结果复现**不需要重新训练**，直接使用发布的 checkpoint 即可。为了提高可访问性，这里给出本次修回中实际使用的代表性单机资源与耗时。
+
+原始 released checkpoint 的训练环境明显比下面这些单卡示例更重：
+
+| 场景 | 硬件 / 显存情况 |
+|---|---|
+| 原始 released checkpoint 训练 | `4 × RTX 3090`，DDP；发布 checkpoint 本身使用 `mem_profile=lowmem` 训练，原始训练中每卡显存通常约 `13-15 GB`；更高显存档位在原始 batch / clip 设置下并不现实 |
+| 本次修回 Princeton 推理 / low-shot adaptation | 单卡 `RTX 4060 Laptop GPU (8188 MiB)`，开启 `AMP=1` 与 `mem_profile=lowmem` |
+
+| 任务 | 代表性配置 | 耗时 | 峰值显存 |
+|---|---|---:|---:|
+| Princeton 外部零样本推理 | `2` 个数据集 × `4` 个模型 × `96` 个胚胎，共 `768` 个 embryo-model job | 总计 `50.5 min`（平均 `3.95 s/job`） | 单卡 `RTX 4060 Laptop (8188 MiB)` 推理 |
+| 低样本微调：`cnn_single + ft12 + frame_tail1` | `batch_size=32`，`val_batch_size=64`，`clip_len=24`，`AMP=1`，`mem_profile=lowmem` | `73.7 s/epoch` | `3.66 GB` |
+| 低样本微调：`full + ft12 + temporal_last1` | `batch_size=16`，`val_batch_size=32`，`clip_len=24`，`AMP=1`，`mem_profile=lowmem` | `135.7 s/epoch` | `5.15 GB` |
+
+上述数字对应的代表性硬件为：
+
+- GPU：`NVIDIA GeForce RTX 4060 Laptop GPU`（`8188 MiB`）
+- CPU：`13th Gen Intel Core i7-13650HX`（`20` 逻辑线程；`10` 核 / `20` 线程）
+- 内存：`15 GiB`
+
+`lowmem` 不是一个模糊标签；代码里它具体把内存配置从默认 balanced 改成如下形式：
+
+| 设置 | `balanced` | `lowmem` | 作用 |
+|---|---:|---:|---|
+| `frame_chunk` | `8` | `4` | 每次 CNN 编码更少帧 |
+| `ckpt_frame` | `False` | `True` | 对**整个 frame encoder**按 chunk 做 checkpoint |
+| `ckpt_cnn` | `True` | `False` | 不再额外做 CNN 内部分段 checkpoint，因为整段 frame checkpoint 已经是主节省项 |
+| `ckpt_segments` | `2` | `1` | 低内存路径下简化 checkpoint 分段 |
+
+在同一套 `full + temporal_last1` 的低样本微调配置下，这几档显存策略在 `RTX 4060 Laptop GPU` 上的表现如下：
+
+| 显存档位 | 单个代表性 epoch 耗时 | 峰值显存 | 说明 |
+|---|---:|---:|---|
+| `ultra` | `142.9 s` | `2.31 GB` | 最省显存，但计算换显存最激进 |
+| `lowmem` | `145.5 s` | `5.12 GB` | 发布 checkpoint 使用的档位；在 `8 GB` 级 GPU 上仍可实际运行 |
+| `balanced` | `251.7 s` | `8.80 GB` | 在 `8 GB` 级笔记本 GPU 上已经接近/超过可用上限 |
+| `fast` | 在这台 `8 GB` 级 GPU 上没有稳定完成代表性 epoch | 接近显存上限 | 对该类硬件并不现实 |
+
+这些数字是**实际参考值**，不是严格下限；具体 wall-clock 会随硬件、存储和软件环境而变化。
 
 ---
 
