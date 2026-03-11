@@ -25,6 +25,10 @@ def main() -> None:
     ap.add_argument("--proc_25c", required=True)
     ap.add_argument("--split_28c5", required=True)
     ap.add_argument("--split_25c", required=True)
+    ap.add_argument("--proc_28c5_sbiad840", default="")
+    ap.add_argument("--proc_25c_sbiad840", default="")
+    ap.add_argument("--split_28c5_sbiad840", default="")
+    ap.add_argument("--split_25c_sbiad840", default="")
     ap.add_argument("--ckpt_cnn_single", required=True)
     ap.add_argument("--ckpt_meanpool", required=True)
     ap.add_argument("--ckpt_nocons", required=True)
@@ -42,6 +46,18 @@ def main() -> None:
         "ID28C5_TEST": (Path(args.proc_28c5), Path(args.split_28c5), "test"),
         "EXT25C_TEST": (Path(args.proc_25c), Path(args.split_25c), "test"),
     }
+    if args.proc_28c5_sbiad840 and args.split_28c5_sbiad840:
+        dataset_map["SBIAD840_28C5_TEST"] = (
+            Path(args.proc_28c5_sbiad840),
+            Path(args.split_28c5_sbiad840),
+            "test",
+        )
+    if args.proc_25c_sbiad840 and args.split_25c_sbiad840:
+        dataset_map["SBIAD840_25C_TEST"] = (
+            Path(args.proc_25c_sbiad840),
+            Path(args.split_25c_sbiad840),
+            "test",
+        )
     ckpt_map = {
         "cnn_single": Path(args.ckpt_cnn_single),
         "meanpool": Path(args.ckpt_meanpool),

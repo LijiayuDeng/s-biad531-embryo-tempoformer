@@ -112,6 +112,12 @@ CKPT_FULL=/ABS/PATH/TO/embryo-tempoformer_release_v1/checkpoints/full_best.pt
 
 **Optional runtime knobs (keep defaults unless needed):**
 ```text
+# External-domain processed npy dirs / splits (after running scripts/34_preprocess_sbiad840.sh)
+PROC_28C5_SBIAD840=./data/sbiad840_aligned_4p5/processed_28C5_sbiad840
+PROC_25C_SBIAD840=./data/sbiad840_aligned_4p5/processed_25C_sbiad840
+SPLIT_28C5_SBIAD840=./data/sbiad840_aligned_4p5/splits/28C5_sbiad840_test.json
+SPLIT_25C_SBIAD840=./data/sbiad840_aligned_4p5/splits/25C_sbiad840_test.json
+
 # Output root directory
 # IMPORTANT: keep RUNS_DIR=./runs because scripts/reproduce_all.sh assumes ./runs
 RUNS_DIR=./runs
@@ -136,6 +142,11 @@ BATCH_SIZE=64
 ### Step 4 — Validate environment paths
 ```bash
 bash scripts/00_check_env.sh
+```
+
+If you also want to validate the external S-BIAD840 processed dataset paths:
+```bash
+WITH_OPTIONAL=sbiad840 bash scripts/00_check_env.sh
 ```
 
 ### Step 5 — One-command reproduction (infer → aggregate → CI/power → figures)

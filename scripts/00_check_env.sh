@@ -12,4 +12,8 @@ set -a
 source .env
 set +a
 PYTHON_BIN="${PYTHON_BIN:-python}"
-"$PYTHON_BIN" analysis/check_env.py
+OPTIONAL_ARGS=()
+if [ -n "${WITH_OPTIONAL:-}" ]; then
+  OPTIONAL_ARGS+=(--with-optional "$WITH_OPTIONAL")
+fi
+"$PYTHON_BIN" analysis/check_env.py "${OPTIONAL_ARGS[@]}"

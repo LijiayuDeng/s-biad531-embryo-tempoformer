@@ -41,6 +41,10 @@ OUTROOT="${1:-${OUTROOT:-}}"
   --proc_25c "$PROC_25C" \
   --split_28c5 "$SPLIT_28C5" \
   --split_25c "$SPLIT_25C" \
+  --proc_28c5_sbiad840 "${PROC_28C5_SBIAD840:-}" \
+  --proc_25c_sbiad840 "${PROC_25C_SBIAD840:-}" \
+  --split_28c5_sbiad840 "${SPLIT_28C5_SBIAD840:-}" \
+  --split_25c_sbiad840 "${SPLIT_25C_SBIAD840:-}" \
   --ckpt_cnn_single "$CKPT_CNN_SINGLE" \
   --ckpt_meanpool "$CKPT_MEANPOOL" \
   --ckpt_nocons "$CKPT_NOCONS" \
