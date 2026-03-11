@@ -662,6 +662,35 @@ Outputs:
 - `splits/28C5_sbiad840_test.json`
 - `splits/25C_sbiad840_test.json`
 
+External-domain evaluation on the processed Princeton set:
+
+```bash
+bash scripts/10_infer_all.sh runs/sbiad840_eval_20260311_4models
+bash scripts/35_aggregate_sbiad840.sh runs/sbiad840_eval_20260311_4models
+bash scripts/36_summarize_sbiad840.sh runs/sbiad840_eval_20260311_4models
+```
+
+Summary outputs:
+
+- `runs/.../sbiad840_external_summary.csv`
+- `runs/.../sbiad840_external_summary.md`
+
+For a denser KimmelNet-style `cnn_single` external check:
+
+```bash
+bash scripts/37_infer_sbiad840_cnn_dense.sh runs/sbiad840_eval_dense_cnn_single
+bash scripts/35_aggregate_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
+bash scripts/36_summarize_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
+bash scripts/38_compare_sbiad840_kimmelnet.sh \
+  runs/sbiad840_eval_20260311_4models \
+  runs/sbiad840_eval_dense_cnn_single
+```
+
+Comparison outputs:
+
+- `runs/.../sbiad840_vs_kimmelnet.csv`
+- `runs/.../sbiad840_vs_kimmelnet.md`
+
 ---
 
 ## ETF CLI quick reference
