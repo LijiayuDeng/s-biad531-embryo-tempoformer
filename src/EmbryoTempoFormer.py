@@ -1231,7 +1231,9 @@ class TrainConfig:
     freeze_frame_encoder: bool = False
     freeze_temporal: bool = False
     freeze_head: bool = False
+    unfreeze_frame_proj: bool = False
     unfreeze_frame_tail_blocks: int = 0
+    unfreeze_temporal_tail_blocks: int = 0
     save_every: int = 1
     patience: int = 0
 
@@ -1282,12 +1284,25 @@ def _apply_finetune_policy(model: EmbryoTempoFormer, cfg: TrainConfig) -> Dict[s
     if cfg.freeze_head:
         _set_module_requires_grad(model.head, False)
 
+    if bool(cfg.unfreeze_frame_proj):
+        _set_module_requires_grad(model.frame_enc.proj, True)
+
     tail_n = max(0, int(cfg.unfreeze_frame_tail_blocks))
     if tail_n > 0:
         # Re-enable the projection and the last N convolutional blocks.
         _set_module_requires_grad(model.frame_enc.proj, True)
         blocks = list(model.frame_enc.blocks.children())
         for blk in blocks[-min(tail_n, len(blocks)):]:
+            _set_module_requires_grad(blk, True)
+
+    temporal_tail_n = max(0, int(cfg.unfreeze_temporal_tail_blocks))
+    if temporal_tail_n > 0:
+        # Re-enable the final N temporal blocks plus cls/norm, which are part
+        # of the minimal transformer readout path.
+        model.cls_token.requires_grad = True
+        _set_module_requires_grad(model.norm, True)
+        blocks = list(model.blocks.children())
+        for blk in blocks[-min(temporal_tail_n, len(blocks)):]:
             _set_module_requires_grad(blk, True)
 
     total = sum(int(p.numel()) for p in model.parameters())
@@ -1632,7 +1647,9 @@ def cmd_train(args):
         amp=args.amp, ema_decay=args.ema_decay, ema_start_ratio=args.ema_start_ratio, ema_eval=args.ema_eval,
         seed=args.seed, device=args.device, resume=args.resume, init_ckpt=args.init_ckpt, init_use_ema=args.init_use_ema,
         freeze_frame_encoder=args.freeze_frame_encoder, freeze_temporal=args.freeze_temporal, freeze_head=args.freeze_head,
+        unfreeze_frame_proj=args.unfreeze_frame_proj,
         unfreeze_frame_tail_blocks=args.unfreeze_frame_tail_blocks,
+        unfreeze_temporal_tail_blocks=args.unfreeze_temporal_tail_blocks,
         save_every=args.save_every, patience=args.patience
     )
 
@@ -2129,7 +2146,9 @@ def build_parser():
     sp.add_argument("--freeze_frame_encoder", action=argparse.BooleanOptionalAction, default=False)
     sp.add_argument("--freeze_temporal", action=argparse.BooleanOptionalAction, default=False)
     sp.add_argument("--freeze_head", action=argparse.BooleanOptionalAction, default=False)
+    sp.add_argument("--unfreeze_frame_proj", action=argparse.BooleanOptionalAction, default=False, help="Re-enable only the frame projection layer after freezing the frame encoder.")
     sp.add_argument("--unfreeze_frame_tail_blocks", type=int, default=0, help="After freezing the frame encoder, re-enable the last N DSConv blocks plus the projection layer.")
+    sp.add_argument("--unfreeze_temporal_tail_blocks", type=int, default=0, help="After freezing temporal modules, re-enable the last N temporal blocks plus cls/norm.")
     sp.add_argument("--save_every", type=int, default=1)
     sp.add_argument("--patience", type=int, default=0)
 

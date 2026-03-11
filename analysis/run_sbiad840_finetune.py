@@ -14,7 +14,20 @@ import torch
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Run low-shot S-BIAD840 fine-tuning from a released checkpoint.")
     p.add_argument("--model", required=True, choices=["cnn_single", "meanpool", "nocons", "full"])
-    p.add_argument("--stage", required=True, choices=["head_only", "temporal_head", "frame_tail1", "frame_tail2", "full_trainable"])
+    p.add_argument(
+        "--stage",
+        required=True,
+        choices=[
+            "head_only",
+            "proj_head",
+            "temporal_last1",
+            "temporal_last2",
+            "temporal_head",
+            "frame_tail1",
+            "frame_tail2",
+            "full_trainable",
+        ],
+    )
     p.add_argument("--split_json", required=True)
     p.add_argument("--proc_dir", required=True)
     p.add_argument("--out_dir", required=True)
@@ -90,6 +103,9 @@ def load_ckpt_cfg(path: str) -> dict[str, Any]:
 def stage_freeze_args(stage: str) -> list[str]:
     mapping = {
         "head_only": ["--freeze_frame_encoder", "--freeze_temporal"],
+        "proj_head": ["--freeze_frame_encoder", "--freeze_temporal", "--unfreeze_frame_proj"],
+        "temporal_last1": ["--freeze_frame_encoder", "--freeze_temporal", "--unfreeze_temporal_tail_blocks", "1"],
+        "temporal_last2": ["--freeze_frame_encoder", "--freeze_temporal", "--unfreeze_temporal_tail_blocks", "2"],
         "temporal_head": ["--freeze_frame_encoder"],
         "frame_tail1": ["--freeze_frame_encoder", "--freeze_temporal", "--unfreeze_frame_tail_blocks", "1"],
         "frame_tail2": ["--freeze_frame_encoder", "--freeze_temporal", "--unfreeze_frame_tail_blocks", "2"],

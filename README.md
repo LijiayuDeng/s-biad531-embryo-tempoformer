@@ -757,6 +757,36 @@ The Princeton `25C` subset is typically best kept as **external validation** in
 the first round, so the initial fine-tune splits are generated only from
 `SBIAD840_28C5_TEST`.
 
+3. Summarize multiple zero-shot and fine-tuned Princeton runs into one table:
+
+```bash
+bash scripts/42_summarize_sbiad840_finetune.sh
+```
+
+Default outputs:
+
+- `runs/sbiad840_finetune_compare/sbiad840_finetune_compare.csv`
+- `runs/sbiad840_finetune_compare/sbiad840_finetune_compare.md`
+
+4. Evaluate a fine-tuned checkpoint on held-out Princeton `28.5C` / `25C`:
+
+```bash
+bash scripts/43_eval_sbiad840_finetuned.sh
+```
+
+Typical environment overrides:
+
+```bash
+FT_CKPT=./runs/finetune_full_ft12_temporal_last1/best.pt
+MODEL=full
+TRAIN_TAG=ft12_temporal_last1
+OUTROOT=./runs/sbiad840_ft12_full_temporal_last1_eval
+RUN_25C=1
+```
+
+This helper reuses the standard Princeton inference + aggregation path and then
+produces held-out external summaries for the selected fine-tuned checkpoint.
+
 ---
 
 ## ETF CLI quick reference
@@ -1292,6 +1322,38 @@ LR=3e-4
 - `frame_tail1`：在 head-only 基础上额外解冻最后一个 CNN stage
 - `frame_tail2`：额外解冻最后两个 CNN stage
 - `full_trainable`：不冻结，做完整低样本微调
+
+3. 微调完成后，可把多个 Princeton adaptation 结果汇总成统一对照表：
+
+```bash
+bash scripts/42_summarize_sbiad840_finetune.sh
+```
+
+默认会读取常用的零样本与微调输出目录，并生成：
+
+- `runs/sbiad840_finetune_compare/sbiad840_finetune_compare.csv`
+- `runs/sbiad840_finetune_compare/sbiad840_finetune_compare.md`
+
+4. 若要对某个微调 checkpoint 做 Princeton held-out 外部评估，可直接运行：
+
+```bash
+bash scripts/43_eval_sbiad840_finetuned.sh
+```
+
+常用环境变量：
+
+```bash
+CKPT=./runs/finetune_full_ft12_temporal_last1_xxx/best.pt
+MODEL=full
+DATASETS=SBIAD840_28C5_TEST,SBIAD840_25C_TEST
+OUT_ROOT=./runs/sbiad840_ft_eval_full_temporal_last1
+```
+
+该脚本会：
+
+- 对指定 Princeton 数据集重新做 inference
+- 自动聚合为 `points.csv / embryo.csv / summary.json`
+- 同时输出一份 `sbiad840_external_summary.csv`
 
 建议顺序：
 
