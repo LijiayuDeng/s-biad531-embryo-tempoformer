@@ -1226,6 +1226,12 @@ class TrainConfig:
     seed: int = 42
     device: str = "auto"
     resume: str = ""
+    init_ckpt: str = ""
+    init_use_ema: bool = False
+    freeze_frame_encoder: bool = False
+    freeze_temporal: bool = False
+    freeze_head: bool = False
+    unfreeze_frame_tail_blocks: int = 0
     save_every: int = 1
     patience: int = 0
 
@@ -1250,6 +1256,43 @@ def build_model(cfg: TrainConfig) -> nn.Module:
         ckpt_cnn=bool(mp["ckpt_cnn"]),
         ckpt_segments=int(mp["ckpt_segments"]),
     )
+
+
+def _set_module_requires_grad(module: nn.Module, requires_grad: bool) -> None:
+    for p in module.parameters():
+        p.requires_grad = bool(requires_grad)
+
+
+def _apply_finetune_policy(model: EmbryoTempoFormer, cfg: TrainConfig) -> Dict[str, int]:
+    """
+    Apply an optional fine-tuning freeze policy to the model in-place.
+
+    Typical usage:
+      - head-only: freeze frame encoder + temporal, keep head trainable
+      - temporal-only adaptation: freeze frame encoder, keep temporal + head
+      - frame-tail adaptation: freeze frame encoder, then unfreeze the last N
+        DSConv blocks plus the projection layer
+    """
+    if cfg.freeze_frame_encoder:
+        _set_module_requires_grad(model.frame_enc, False)
+    if cfg.freeze_temporal:
+        _set_module_requires_grad(model.blocks, False)
+        _set_module_requires_grad(model.norm, False)
+        model.cls_token.requires_grad = False
+    if cfg.freeze_head:
+        _set_module_requires_grad(model.head, False)
+
+    tail_n = max(0, int(cfg.unfreeze_frame_tail_blocks))
+    if tail_n > 0:
+        # Re-enable the projection and the last N convolutional blocks.
+        _set_module_requires_grad(model.frame_enc.proj, True)
+        blocks = list(model.frame_enc.blocks.children())
+        for blk in blocks[-min(tail_n, len(blocks)):]:
+            _set_module_requires_grad(blk, True)
+
+    total = sum(int(p.numel()) for p in model.parameters())
+    trainable = sum(int(p.numel()) for p in model.parameters() if p.requires_grad)
+    return {"total_params": total, "trainable_params": trainable}
 
 
 def build_loaders(cfg: TrainConfig, ddp: bool):
@@ -1570,6 +1613,9 @@ def _trainconfig_from_ckpt_cfg(ck_cfg: Dict[str, Any], overrides: Dict[str, Any]
 # Commands: train / eval / infer / preprocess / make_split
 # ---------------------------------------------------------------------
 def cmd_train(args):
+    if args.resume and args.init_ckpt:
+        raise ValueError("Use either --resume or --init_ckpt, not both.")
+
     cfg = TrainConfig(
         proc_dir=args.proc_dir, split_json=args.split_json, out_dir=args.out_dir,
         clip_len=args.clip_len, img_size=args.img_size, expect_t=args.expect_t,
@@ -1584,7 +1630,10 @@ def cmd_train(args):
         mem_profile=args.mem_profile,
         lambda_abs=args.lambda_abs, lambda_diff=args.lambda_diff, cons_ramp_ratio=args.cons_ramp_ratio, abs_loss_type=args.abs_loss_type,
         amp=args.amp, ema_decay=args.ema_decay, ema_start_ratio=args.ema_start_ratio, ema_eval=args.ema_eval,
-        seed=args.seed, device=args.device, resume=args.resume, save_every=args.save_every, patience=args.patience
+        seed=args.seed, device=args.device, resume=args.resume, init_ckpt=args.init_ckpt, init_use_ema=args.init_use_ema,
+        freeze_frame_encoder=args.freeze_frame_encoder, freeze_temporal=args.freeze_temporal, freeze_head=args.freeze_head,
+        unfreeze_frame_tail_blocks=args.unfreeze_frame_tail_blocks,
+        save_every=args.save_every, patience=args.patience
     )
 
     device, ddp = ddp_init()
@@ -1601,6 +1650,23 @@ def cmd_train(args):
     seed_all(cfg.seed + ddp_rank())
 
     model = build_model(cfg).to(device)
+
+    if cfg.init_ckpt:
+        init_state = torch.load(cfg.init_ckpt, map_location="cpu", weights_only=False)
+        _load_ckpt_weights_into_model(model, init_state, use_ema=bool(cfg.init_use_ema))
+        if ddp_is_main():
+            src = "ema" if cfg.init_use_ema and init_state.get("ema") is not None else "model"
+            print(f"[init_ckpt] loaded {src} weights from {cfg.init_ckpt}")
+
+    finetune_stats = _apply_finetune_policy(model, cfg)
+    if finetune_stats["trainable_params"] <= 0:
+        raise ValueError("No trainable parameters remain after applying the freeze policy.")
+    if ddp_is_main():
+        print(
+            f"[trainable] {finetune_stats['trainable_params']:,} / "
+            f"{finetune_stats['total_params']:,} parameters"
+        )
+
     if ddp:
         model = DDP(
             model,
@@ -1608,7 +1674,8 @@ def cmd_train(args):
             find_unused_parameters=(cfg.temporal_mode != "transformer")
         )
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     dl_train, dl_val, train_sampler, _ = build_loaders(cfg, ddp=ddp)
 
     steps_per_epoch = max(1, math.ceil(len(dl_train) / max(1, int(cfg.grad_accum))))
@@ -2057,6 +2124,12 @@ def build_parser():
     sp.add_argument("--seed", type=int, default=42)
     sp.add_argument("--device", type=str, default="auto")
     sp.add_argument("--resume", type=str, default="")
+    sp.add_argument("--init_ckpt", type=str, default="", help="Initialize model weights from a checkpoint but start a fresh optimizer/scheduler.")
+    sp.add_argument("--init_use_ema", action=argparse.BooleanOptionalAction, default=False, help="When used with --init_ckpt, load EMA weights if present.")
+    sp.add_argument("--freeze_frame_encoder", action=argparse.BooleanOptionalAction, default=False)
+    sp.add_argument("--freeze_temporal", action=argparse.BooleanOptionalAction, default=False)
+    sp.add_argument("--freeze_head", action=argparse.BooleanOptionalAction, default=False)
+    sp.add_argument("--unfreeze_frame_tail_blocks", type=int, default=0, help="After freezing the frame encoder, re-enable the last N DSConv blocks plus the projection layer.")
     sp.add_argument("--save_every", type=int, default=1)
     sp.add_argument("--patience", type=int, default=0)
 

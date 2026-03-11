@@ -623,7 +623,7 @@ is a directory (`Dataset_C/<time_hpf>/`, `Dataset_D/<time_hpf>/`) containing 96
 PNG frames, one per embryo. To make this external dataset compatible with the ETF
 release pipeline, we first reassemble one time-ordered stack per embryo and then
 apply the **same** ETF preprocessing steps (`p_lo=1`, `p_hi=99`, resize to
-`384x384`, pad/trim to `192` frames).
+`384x384`, and optionally pad/trim toward release-style `192`-frame tensors).
 
 For compatibility with the released checkpoints, the helper below aligns both
 conditions to `4.5 hpf` before preprocessing. This means:
@@ -690,6 +690,72 @@ Comparison outputs:
 
 - `runs/.../sbiad840_vs_kimmelnet.csv`
 - `runs/.../sbiad840_vs_kimmelnet.md`
+
+## Optional: Low-shot S-BIAD840 fine-tuning
+
+If zero-shot Princeton calibration is insufficient, the repository now supports
+**fresh fine-tuning from released checkpoints** without inheriting optimizer or
+scheduler state. This is intended for site-specific adaptation rather than
+continuing the original Crick training run.
+
+1. Create low-shot `28.5C` fine-tune splits from the external Princeton pool:
+
+```bash
+bash scripts/39_make_sbiad840_finetune_splits.sh
+```
+
+Default outputs:
+
+- `data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft12_v12_seed42.json`
+- `data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft24_v12_seed42.json`
+- `data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_manifest_seed42.json`
+
+By default, these correspond to:
+
+- `12 train / 12 val / 72 test`
+- `24 train / 12 val / 60 test`
+
+2. Fine-tune from a released checkpoint with a stage-specific freeze policy:
+
+```bash
+bash scripts/41_finetune_sbiad840.sh
+```
+
+The helper automatically rebuilds the model architecture from the selected
+checkpoint cfg (`cnn_base`, `model_dim`, `mem_profile`, etc.), so low-shot runs
+stay checkpoint-compatible by default rather than silently falling back to the
+generic train CLI defaults.
+
+Key environment overrides:
+
+```bash
+MODEL=cnn_single
+STAGE=head_only
+SPLIT_JSON=./data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft12_v12_seed42.json
+PROC_DIR=./data/sbiad840_aligned_4p5/processed_28C5_sbiad840
+OUT_DIR=./runs/finetune_cnn_single_head_only
+EPOCHS=30
+LR=3e-4
+```
+
+Supported `STAGE` values:
+
+- `head_only`: freeze frame encoder and temporal module; adapt only the final regression head
+- `temporal_head`: freeze frame encoder; allow temporal stack + head to adapt
+- `frame_tail1`: keep head-only behavior but unfreeze the last CNN stage
+- `frame_tail2`: unfreeze the last two CNN stages in addition to the head
+- `full_trainable`: no freezing; full low-shot fine-tuning
+
+Recommended order:
+
+1. Start with `MODEL=cnn_single STAGE=head_only`
+2. If calibration remains poor, try `MODEL=cnn_single STAGE=frame_tail1`
+3. Then move to `MODEL=full STAGE=head_only`
+4. Only unfreeze more of the temporal/CNN stack if the lighter stages are insufficient
+
+The Princeton `25C` subset is typically best kept as **external validation** in
+the first round, so the initial fine-tune splits are generated only from
+`SBIAD840_28C5_TEST`.
 
 ---
 
@@ -1097,6 +1163,145 @@ python3 src/EmbryoTempoFormer.py preprocess \
 - resize 到 `384x384`（PIL 双线性）
 - 时间维 pad/trim 到 `192` 帧
 - 每胚胎保存一个 `.npy`
+
+---
+
+## 可选：导入 S-BIAD840 Princeton PNG 导出
+
+`S-BIAD840` 不是“一胚胎一个堆栈文件”的结构，而是每个时间点一个目录
+（`Dataset_C/<time_hpf>/`、`Dataset_D/<time_hpf>/`），每个目录下有 96 张
+PNG，各自对应一个胚胎。为了让这批外部数据可直接接入 ETF 流程，我们先按
+胚胎重组时间序列，再应用与发布版一致的预处理参数：`p_lo=1`、`p_hi=99`、
+resize 到 `384x384`，并可选地再做 release 风格的固定长度时间轴处理。
+
+为了与发布 checkpoint 的时间语义对齐，辅助脚本会先把两种条件都对齐到
+`4.5 hpf`：
+
+- `Dataset_C`（28.5C）丢弃最前 4 帧（`3.5 -> 4.25 hpf`）
+- `Dataset_D`（25C）丢弃最前 8 帧（`2.5 -> 4.25 hpf`）
+- 两者随后都保留 `168` 个真实帧（`4.5 -> 46.25 hpf`）
+
+默认 **不会** 补到 `192` 帧；这是刻意的，因为 ETF 推理只要求 `T >= clip_len`，
+保留原生 `168` 帧可以避免在外部域测试里注入尾部重复帧。如果确实需要和发布
+版完全一致的固定长度数组，再显式设置 `PAD_TO_EXPECT=1`。
+
+运行：
+
+```bash
+bash scripts/34_preprocess_sbiad840.sh
+bash scripts/34_preprocess_sbiad840.sh ./data/sbiad840_aligned_4p5
+```
+
+常用环境变量：
+
+```bash
+SBIAD840_SRC_ROOT=/ABS/PATH/TO/s-biad840/Files/Princeton_Data
+SBIAD840_OUT_ROOT=./data/sbiad840_aligned_4p5
+ALIGN_START_HPF=4.5
+PAD_TO_EXPECT=0
+LIMIT=0
+```
+
+输出：
+
+- `processed_28C5_sbiad840/*.npy`
+- `processed_25C_sbiad840/*.npy`
+- `splits/28C5_sbiad840_test.json`
+- `splits/25C_sbiad840_test.json`
+
+处理完成后，可直接做外部域评估：
+
+```bash
+bash scripts/10_infer_all.sh runs/sbiad840_eval_20260311_4models
+bash scripts/35_aggregate_sbiad840.sh runs/sbiad840_eval_20260311_4models
+bash scripts/36_summarize_sbiad840.sh runs/sbiad840_eval_20260311_4models
+```
+
+汇总输出：
+
+- `runs/.../sbiad840_external_summary.csv`
+- `runs/.../sbiad840_external_summary.md`
+
+如果要补一个更接近 KimmelNet 论文口径的 `cnn_single` 密集单帧对照：
+
+```bash
+bash scripts/37_infer_sbiad840_cnn_dense.sh runs/sbiad840_eval_dense_cnn_single
+bash scripts/35_aggregate_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
+bash scripts/36_summarize_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
+bash scripts/38_compare_sbiad840_kimmelnet.sh \
+  runs/sbiad840_eval_20260311_4models \
+  runs/sbiad840_eval_dense_cnn_single
+```
+
+对照输出：
+
+- `runs/.../sbiad840_vs_kimmelnet.csv`
+- `runs/.../sbiad840_vs_kimmelnet.md`
+
+---
+
+## 可选：S-BIAD840 低样本微调
+
+如果 Princeton 的 zero-shot 校准仍然不够，可以直接从发布 checkpoint 做**重新
+开始的低样本微调**。这里用的是 `init_ckpt` 模式：只加载模型权重，不继承原训练
+的 optimizer / scheduler 状态，因此更适合新站点适配，而不是简单续训。
+
+1. 先从 `SBIAD840_28C5_TEST` 生成低样本微调 split：
+
+```bash
+bash scripts/39_make_sbiad840_finetune_splits.sh
+```
+
+默认会生成：
+
+- `data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft12_v12_seed42.json`
+- `data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft24_v12_seed42.json`
+- `data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_manifest_seed42.json`
+
+对应两档：
+
+- `12 train / 12 val / 72 test`
+- `24 train / 12 val / 60 test`
+
+2. 再用 stage-specific freeze policy 做微调：
+
+```bash
+bash scripts/41_finetune_sbiad840.sh
+```
+
+这个辅助脚本会自动从所选 checkpoint 的 cfg 里恢复模型架构和主要训练默认值
+（例如 `cnn_base`、`model_dim`、`mem_profile`），因此低样本微调默认会与原始
+权重保持结构兼容，而不是悄悄退回到通用 `train` CLI 的默认参数。
+
+常用环境变量：
+
+```bash
+MODEL=cnn_single
+STAGE=head_only
+SPLIT_JSON=./data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft12_v12_seed42.json
+PROC_DIR=./data/sbiad840_aligned_4p5/processed_28C5_sbiad840
+OUT_DIR=./runs/finetune_cnn_single_head_only
+EPOCHS=30
+LR=3e-4
+```
+
+支持的 `STAGE`：
+
+- `head_only`：冻结 frame encoder 和 temporal 模块，只训练最终回归头
+- `temporal_head`：冻结 frame encoder，只让 temporal stack + head 适配
+- `frame_tail1`：在 head-only 基础上额外解冻最后一个 CNN stage
+- `frame_tail2`：额外解冻最后两个 CNN stage
+- `full_trainable`：不冻结，做完整低样本微调
+
+建议顺序：
+
+1. 先做 `MODEL=cnn_single STAGE=head_only`
+2. 如果校准仍明显偏移，再试 `MODEL=cnn_single STAGE=frame_tail1`
+3. 然后做 `MODEL=full STAGE=head_only`
+4. 只有轻量阶段不够时，再继续解冻 temporal / CNN 更多层
+
+第一轮通常建议**只用 `SBIAD840_28C5_TEST` 做微调**，把 `SBIAD840_25C_TEST`
+保留为外部验证集，用来检查 site-specific 适配后温度减速结论是否仍成立。
 
 ---
 
