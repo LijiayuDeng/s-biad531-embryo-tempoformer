@@ -740,18 +740,28 @@ LR=3e-4
 
 Supported `STAGE` values:
 
-- `head_only`: freeze frame encoder and temporal module; adapt only the final regression head
-- `temporal_head`: freeze frame encoder; allow temporal stack + head to adapt
-- `frame_tail1`: keep head-only behavior but unfreeze the last CNN stage
-- `frame_tail2`: unfreeze the last two CNN stages in addition to the head
+- `head_only`: freeze the entire frame encoder and temporal module; keep only the final regression head trainable
+- `proj_head`: same as `head_only`, but also unfreeze the frame projection layer (`frame_enc.proj`)
+- `frame_tail1`: same as `head_only`, but also unfreeze the frame projection layer and the last CNN block
+- `frame_tail2`: same as `head_only`, but also unfreeze the frame projection layer and the last two CNN blocks
+- `temporal_last1`: freeze the frame encoder and temporal module first, then re-enable the final temporal block plus the transformer readout path (`cls_token` and `norm`)
+- `temporal_last2`: same as `temporal_last1`, but re-enable the last two temporal blocks plus `cls_token` and `norm`
+- `temporal_head`: freeze only the frame encoder; allow the full temporal stack plus the regression head to adapt
 - `full_trainable`: no freezing; full low-shot fine-tuning
+
+Notes:
+
+- `frame_tail*` stages test whether adapting high-level frame semantics is already sufficient.
+- `temporal_last*` / `temporal_head` are intended for models with an actual temporal stack (for example `full` and `nocons`).
+- On models whose forward path does not use temporal blocks, `temporal_last*` will not expose additional temporal parameters beyond the active readout path.
 
 Recommended order:
 
 1. Start with `MODEL=cnn_single STAGE=head_only`
 2. If calibration remains poor, try `MODEL=cnn_single STAGE=frame_tail1`
-3. Then move to `MODEL=full STAGE=head_only`
-4. Only unfreeze more of the temporal/CNN stack if the lighter stages are insufficient
+3. For the clip-based main model, then move to `MODEL=full STAGE=head_only`
+4. Next test a localized temporal update such as `MODEL=full STAGE=temporal_last1`
+5. Only move to broader updates (`frame_tail2`, `temporal_last2`, `temporal_head`, or `full_trainable`) if the lighter stages are insufficient
 
 The Princeton `25C` subset is typically best kept as **external validation** in
 the first round, so the initial fine-tune splits are generated only from
@@ -1317,11 +1327,20 @@ LR=3e-4
 
 支持的 `STAGE`：
 
-- `head_only`：冻结 frame encoder 和 temporal 模块，只训练最终回归头
-- `temporal_head`：冻结 frame encoder，只让 temporal stack + head 适配
-- `frame_tail1`：在 head-only 基础上额外解冻最后一个 CNN stage
-- `frame_tail2`：额外解冻最后两个 CNN stage
+- `head_only`：冻结整个 frame encoder 和 temporal 模块，只训练最终回归头
+- `proj_head`：在 `head_only` 基础上，额外解冻 frame 投影层（`frame_enc.proj`）
+- `frame_tail1`：在 `head_only` 基础上，额外解冻 frame 投影层和最后一个 CNN block
+- `frame_tail2`：在 `head_only` 基础上，额外解冻 frame 投影层和最后两个 CNN block
+- `temporal_last1`：先冻结 frame encoder 与 temporal 模块，再重新放开最后一个 temporal block，以及 transformer readout 路径里的 `cls_token` 和 `norm`
+- `temporal_last2`：在 `temporal_last1` 基础上，放开最后两个 temporal block，以及 `cls_token` 和 `norm`
+- `temporal_head`：只冻结 frame encoder，让整个 temporal stack 和最终回归头一起适配
 - `full_trainable`：不冻结，做完整低样本微调
+
+说明：
+
+- `frame_tail*` 主要用于测试“只适配高层视觉语义”是否已经足够。
+- `temporal_last*` / `temporal_head` 主要用于真正带 temporal stack 的模型（例如 `full`、`nocons`）。
+- 对于前向路径里本来就不使用 temporal blocks 的模型，`temporal_last*` 不会额外放出真正的时序参数。
 
 3. 微调完成后，可把多个 Princeton adaptation 结果汇总成统一对照表：
 
@@ -1359,8 +1378,9 @@ OUT_ROOT=./runs/sbiad840_ft_eval_full_temporal_last1
 
 1. 先做 `MODEL=cnn_single STAGE=head_only`
 2. 如果校准仍明显偏移，再试 `MODEL=cnn_single STAGE=frame_tail1`
-3. 然后做 `MODEL=full STAGE=head_only`
-4. 只有轻量阶段不够时，再继续解冻 temporal / CNN 更多层
+3. 对 clip-based 主方法，再做 `MODEL=full STAGE=head_only`
+4. 然后测试局部 temporal 适配，例如 `MODEL=full STAGE=temporal_last1`
+5. 只有轻量阶段不够时，再继续尝试更大范围解冻（`frame_tail2`、`temporal_last2`、`temporal_head` 或 `full_trainable`）
 
 第一轮通常建议**只用 `SBIAD840_28C5_TEST` 做微调**，把 `SBIAD840_25C_TEST`
 保留为外部验证集，用来检查 site-specific 适配后温度减速结论是否仍成立。
