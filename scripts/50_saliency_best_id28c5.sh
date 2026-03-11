@@ -53,27 +53,10 @@ if [ ! -f "$EMBRYO_CSV" ]; then
   exit 1
 fi
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
 # pick best EID by (rmse_resid, max_abs_resid)
-EID="$(python3 - <<PY
-import csv, math
-p="$EMBRYO_CSV"
-best=None
-with open(p,"r",encoding="utf-8") as f:
-    r=csv.DictReader(f)
-    for row in r:
-        eid=row["eid"]
-        rr=float(row["rmse_resid"])
-        mx=float(row["max_abs_resid"])
-        if not (math.isfinite(rr) and math.isfinite(mx)):
-            continue
-        key=(rr,mx)
-        if best is None or key < best[0]:
-            best=(key,eid,rr,mx)
-if best is None:
-    raise SystemExit("No valid rows found in embryo.csv")
-print(best[1])
-PY
-)"
+EID="$("$PYTHON_BIN" analysis/select_best_embryo.py --embryo_csv "$EMBRYO_CSV")"
 
 echo "[INFO] OUTROOT=$OUTROOT"
 echo "[INFO] MODEL=$MODEL"
@@ -114,7 +97,7 @@ ALPHA_THR="${SAL_ALPHA_THR:-0.25}"
 ALPHA_MAX="${SAL_ALPHA_MAX:-0.98}"
 
 echo "[INFO] running SmoothGrad saliency (five clips) -> $OUTDIR"
-PYTHONPATH=. python3 analysis/vis_clip_saliency.py \
+PYTHONPATH=. "$PYTHON_BIN" analysis/vis_clip_saliency.py \
   --ckpt "$CKPT" \
   --npy  "$NPY" \
   --five \

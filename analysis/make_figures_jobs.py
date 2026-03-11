@@ -21,8 +21,13 @@ No pandas required. Requires numpy + matplotlib.
 from __future__ import annotations
 import argparse, csv, json
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, cast
+
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 import numpy as np
+from numpy.typing import NDArray
 
 
 MODELS = ["cnn_single", "meanpool", "nocons", "full"]
@@ -36,16 +41,20 @@ COLORS = {
     "full":       "#D33F49",  # red (final)
 }
 
-def ensure(p: Path):
+JSONDict = dict[str, Any]
+FloatArray = NDArray[np.float64]
+
+
+def ensure(p: Path) -> None:
     if not p.exists():
         raise FileNotFoundError(str(p))
 
-def read_json(p: Path) -> dict:
+def read_json(p: Path) -> JSONDict:
     with open(p, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return cast(JSONDict, json.load(f))
 
-def read_csv_col(p: Path, col: str) -> np.ndarray:
-    vals=[]
+def read_csv_col(p: Path, col: str) -> FloatArray:
+    vals: list[float] = []
     with open(p, "r", encoding="utf-8") as f:
         r = csv.DictReader(f)
         if col not in (r.fieldnames or []):
@@ -61,7 +70,7 @@ def read_csv_col(p: Path, col: str) -> np.ndarray:
         raise ValueError(f"No numeric values for '{col}' in {p}")
     return np.array(vals, dtype=np.float64)
 
-def set_style():
+def set_style() -> None:
     import matplotlib as mpl
     mpl.rcParams.update({
         "figure.facecolor": "white",
@@ -96,14 +105,14 @@ def set_style():
         "grid.alpha": 0.6,
     })
 
-def save_both(fig, out_base: Path, dpi: int):
+def save_both(fig: Figure, out_base: Path, dpi: int) -> None:
     out_base.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(str(out_base.with_suffix(".png")), dpi=dpi)
     fig.savefig(str(out_base.with_suffix(".pdf")))
     print("WROTE:", out_base.with_suffix(".png"))
     print("WROTE:", out_base.with_suffix(".pdf"))
 
-def _nice_xlim_from_ci(lo: np.ndarray, hi: np.ndarray, pad: float = 0.15) -> Tuple[float,float]:
+def _nice_xlim_from_ci(lo: FloatArray, hi: FloatArray, pad: float = 0.15) -> tuple[float, float]:
     mn = float(np.min(lo))
     mx = float(np.max(hi))
     span = mx - mn
@@ -111,27 +120,33 @@ def _nice_xlim_from_ci(lo: np.ndarray, hi: np.ndarray, pad: float = 0.15) -> Tup
         span = 1.0
     return (mn - pad*span, mx + pad*span)
 
-def _jitter(n: int, scale: float, seed: int = 0) -> np.ndarray:
+def _jitter(n: int, scale: float, seed: int = 0) -> FloatArray:
     rng = np.random.default_rng(seed)
-    return rng.normal(loc=0.0, scale=scale, size=n).astype(np.float32)
+    return rng.normal(loc=0.0, scale=scale, size=n).astype(np.float64)
 
-def violin_quartile_jitter(ax, data_list: List[np.ndarray], x: np.ndarray, colors: List[str],
-                           ylabel: str, title: str, jitter: bool = True):
+def violin_quartile_jitter(
+    ax: Axes,
+    data_list: list[FloatArray],
+    x: FloatArray,
+    colors: list[str],
+    ylabel: str,
+    title: str,
+    jitter: bool = True,
+) -> None:
     """
     Violin + IQR bar + median dot + optional light jitter points.
     (raincloud-lite without seaborn)
     """
-    import numpy as np
-
-    parts = ax.violinplot(
+    parts = cast(dict[str, Any], ax.violinplot(
         data_list,
         positions=x,
         widths=0.78,
         showmeans=False,
         showextrema=False,
         showmedians=False,
-    )
-    for body, c in zip(parts["bodies"], colors):
+    ))
+    bodies = cast(list[Any], parts["bodies"])
+    for body, c in zip(bodies, colors):
         body.set_facecolor(c)
         body.set_edgecolor(c)
         body.set_alpha(0.18)
@@ -139,7 +154,10 @@ def violin_quartile_jitter(ax, data_list: List[np.ndarray], x: np.ndarray, color
 
     # IQR + median, plus optional jitter points
     for xi, d, c in zip(x, data_list, colors):
-        q1, med, q3 = np.quantile(d, [0.25, 0.5, 0.75])
+        q = np.quantile(d, np.array([0.25, 0.5, 0.75], dtype=np.float64))
+        q1 = float(q[0])
+        med = float(q[1])
+        q3 = float(q[2])
         ax.plot([xi, xi], [q1, q3], color=c, linewidth=3.0, solid_capstyle="round", zorder=3)
         ax.scatter([xi], [med], s=34, color=c, edgecolor="white", linewidth=0.9, zorder=4)
 
@@ -147,7 +165,7 @@ def violin_quartile_jitter(ax, data_list: List[np.ndarray], x: np.ndarray, color
             # light points (do not dominate)
             j = _jitter(len(d), scale=0.06, seed=42)
             ax.scatter(
-                np.full_like(d, xi, dtype=np.float32) + j,
+                np.full(d.shape, float(xi), dtype=np.float64) + j,
                 d,
                 s=8,
                 color=c,
@@ -161,7 +179,7 @@ def violin_quartile_jitter(ax, data_list: List[np.ndarray], x: np.ndarray, color
     ax.set_ylabel(ylabel)
     ax.set_title(title)
 
-def fig2_id_ablation(outroot: Path, outdir: Path, dpi: int):
+def fig2_id_ablation(outroot: Path, outdir: Path, dpi: int) -> None:
     """
     Fig2: make it squarer by stacking panels vertically (2x1).
 
@@ -170,8 +188,11 @@ def fig2_id_ablation(outroot: Path, outdir: Path, dpi: int):
     """
     import matplotlib.pyplot as plt
 
-    mae=[]; rmse=[]; resid=[]
-    n_emb=None; n_pts=None
+    mae: list[float] = []
+    rmse: list[float] = []
+    resid: list[float] = []
+    n_emb: int | None = None
+    n_pts: int | None = None
     for m in MODELS:
         p = outroot / "ID28C5_TEST" / m / "summary.json"
         ensure(p)
@@ -182,14 +203,14 @@ def fig2_id_ablation(outroot: Path, outdir: Path, dpi: int):
         n_emb = int(d["global_metrics_points"]["n_embryos"])
         n_pts = int(d["global_metrics_points"]["n_points"])
 
-    x = np.arange(len(MODELS))
+    x: FloatArray = np.arange(len(MODELS), dtype=np.float64)
     colors = [COLORS[m] for m in MODELS]
 
-    fig = plt.figure(figsize=(6.8, 6.8))  # squarer
+    fig: Figure = cast(Figure, plt.figure(figsize=(6.8, 6.8)))  # squarer
     gs = fig.add_gridspec(2, 1, height_ratios=[1.05, 1.0], hspace=0.35)
 
     # Panel A
-    ax = fig.add_subplot(gs[0, 0])
+    ax: Axes = cast(Axes, fig.add_subplot(gs[0, 0]))
     dx = 0.13
     for i, m in enumerate(MODELS):
         c = COLORS[m]
@@ -202,18 +223,18 @@ def fig2_id_ablation(outroot: Path, outdir: Path, dpi: int):
     ax.set_ylabel("Error (hours)")
     ax.set_title(f"ID 28.5°C test (n={n_emb} embryos, {n_pts} points; stride=8)")
 
-    mae_h = plt.Line2D([0],[0], marker="o", linestyle="none",
-                       markerfacecolor="#111111", markeredgecolor="#111111",
-                       markersize=7, label="MAE (filled)")
-    rmse_h = plt.Line2D([0],[0], marker="o", linestyle="none",
-                        markerfacecolor="white", markeredgecolor="#111111",
-                        markersize=7, label="RMSE (hollow)")
+    mae_h = Line2D([0], [0], marker="o", linestyle="none",
+                   markerfacecolor="#111111", markeredgecolor="#111111",
+                   markersize=7, label="MAE (filled)")
+    rmse_h = Line2D([0], [0], marker="o", linestyle="none",
+                    markerfacecolor="white", markeredgecolor="#111111",
+                    markersize=7, label="RMSE (hollow)")
     ax.legend(handles=[mae_h, rmse_h], frameon=False, loc="upper left")
 
     # Panel B (sorted by residual)
-    ax2 = fig.add_subplot(gs[1, 0])
-    order = list(np.argsort(resid))  # best (small) first
-    y = np.arange(len(order))
+    ax2: Axes = cast(Axes, fig.add_subplot(gs[1, 0]))
+    order: list[int] = [int(i) for i in np.argsort(np.array(resid, dtype=np.float64))]
+    y: FloatArray = np.arange(len(order), dtype=np.float64)
     y_labels = [LABELS[i] for i in order]
     for yy, idx in zip(y, order):
         m = MODELS[idx]
@@ -231,10 +252,10 @@ def fig2_id_ablation(outroot: Path, outdir: Path, dpi: int):
     save_both(fig, outdir / "Fig2_ID_ablation", dpi=dpi)
     plt.close(fig)
 
-def fig3_ext_m_anchor(outroot: Path, outdir: Path, dpi: int):
+def fig3_ext_m_anchor(outroot: Path, outdir: Path, dpi: int) -> None:
     import matplotlib.pyplot as plt
-    m_list=[]
-    n_emb=None
+    m_list: list[FloatArray] = []
+    n_emb: int | None = None
     for m in MODELS:
         p = outroot / "EXT25C_TEST" / m / "embryo.csv"
         ensure(p)
@@ -243,10 +264,10 @@ def fig3_ext_m_anchor(outroot: Path, outdir: Path, dpi: int):
         n_emb = int(arr.size)
 
     colors = [COLORS[m] for m in MODELS]
-    x = np.arange(1, len(MODELS)+1)
+    x: FloatArray = np.arange(1, len(MODELS)+1, dtype=np.float64)
 
-    fig = plt.figure(figsize=(6.6, 6.2))  # more square
-    ax = fig.add_subplot(1,1,1)
+    fig: Figure = cast(Figure, plt.figure(figsize=(6.6, 6.2)))  # more square
+    ax: Axes = cast(Axes, fig.add_subplot(1, 1, 1))
     violin_quartile_jitter(
         ax, m_list, x, colors,
         ylabel="m_anchor (tempo slope)",
@@ -257,19 +278,19 @@ def fig3_ext_m_anchor(outroot: Path, outdir: Path, dpi: int):
     save_both(fig, outdir / "Fig3_EXT_m_anchor", dpi=dpi)
     plt.close(fig)
 
-def fig3_ext_rmse_resid(outroot: Path, outdir: Path, dpi: int):
+def fig3_ext_rmse_resid(outroot: Path, outdir: Path, dpi: int) -> None:
     import matplotlib.pyplot as plt
-    r_list=[]
+    r_list: list[FloatArray] = []
     for m in MODELS:
         p = outroot / "EXT25C_TEST" / m / "embryo.csv"
         ensure(p)
         r_list.append(read_csv_col(p, "rmse_resid"))
 
     colors = [COLORS[m] for m in MODELS]
-    x = np.arange(1, len(MODELS)+1)
+    x: FloatArray = np.arange(1, len(MODELS)+1, dtype=np.float64)
 
-    fig = plt.figure(figsize=(6.6, 6.2))  # more square
-    ax = fig.add_subplot(1,1,1)
+    fig: Figure = cast(Figure, plt.figure(figsize=(6.6, 6.2)))  # more square
+    ax: Axes = cast(Axes, fig.add_subplot(1, 1, 1))
     violin_quartile_jitter(
         ax, r_list, x, colors,
         ylabel="rmse_resid (hours)",
@@ -279,10 +300,12 @@ def fig3_ext_rmse_resid(outroot: Path, outdir: Path, dpi: int):
     save_both(fig, outdir / "Fig3_EXT_rmse_resid", dpi=dpi)
     plt.close(fig)
 
-def fig3_delta_m_forest(outroot: Path, outdir: Path, dpi: int):
+def fig3_delta_m_forest(outroot: Path, outdir: Path, dpi: int) -> None:
     import matplotlib.pyplot as plt
 
-    deltas=[]; lo=[]; hi=[]
+    deltas: list[float] = []
+    lo: list[float] = []
+    hi: list[float] = []
     for m in MODELS:
         p = outroot / f"CI_{m}_m_anchor.json"
         ensure(p)
@@ -295,14 +318,14 @@ def fig3_delta_m_forest(outroot: Path, outdir: Path, dpi: int):
     order = [3, 2, 1, 0]
     labels = [LABELS[i] for i in order]
     colors = [COLORS[MODELS[i]] for i in order]
-    dm = np.array([deltas[i] for i in order])
-    l  = np.array([lo[i] for i in order])
-    h  = np.array([hi[i] for i in order])
+    dm: FloatArray = np.array([deltas[i] for i in order], dtype=np.float64)
+    l: FloatArray = np.array([lo[i] for i in order], dtype=np.float64)
+    h: FloatArray = np.array([hi[i] for i in order], dtype=np.float64)
 
-    y = np.arange(len(order))
+    y: FloatArray = np.arange(len(order), dtype=np.float64)
 
-    fig = plt.figure(figsize=(6.6, 6.0))  # squarer
-    ax = fig.add_subplot(1,1,1)
+    fig: Figure = cast(Figure, plt.figure(figsize=(6.6, 6.0)))  # squarer
+    ax: Axes = cast(Axes, fig.add_subplot(1, 1, 1))
 
     for yy, mval, ll, hh, c in zip(y, dm, l, h, colors):
         ax.plot([ll, hh], [yy, yy], color=c, linewidth=3.2, solid_capstyle="round", alpha=0.85)
@@ -319,7 +342,7 @@ def fig3_delta_m_forest(outroot: Path, outdir: Path, dpi: int):
     save_both(fig, outdir / "Fig3_delta_m_forest", dpi=dpi)
     plt.close(fig)
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--outroot", required=True)
     ap.add_argument("--outdir", default="")

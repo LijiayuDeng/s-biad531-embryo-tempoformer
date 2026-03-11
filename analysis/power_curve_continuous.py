@@ -58,11 +58,15 @@ from __future__ import annotations
 import argparse
 import csv
 import math
-import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from numpy.typing import NDArray
+
+
+# Numeric array alias used throughout this script to satisfy strict type checkers.
+FloatArray = NDArray[np.float64]
 
 
 # -----------------------------
@@ -70,7 +74,7 @@ import numpy as np
 # -----------------------------
 
 
-def read_col(csv_path: Path, col: str) -> np.ndarray:
+def read_col(csv_path: Path, col: str) -> FloatArray:
     """Read one numeric column from a CSV into a float64 numpy array."""
     vals: List[float] = []
     with csv_path.open("r", encoding="utf-8") as f:
@@ -126,16 +130,16 @@ def build_axis_ticks(y_min: float, y_max: float, step: float) -> List[float]:
 # -----------------------------
 
 
-def bootstrap_ci_delta(m_a: np.ndarray, m_b: np.ndarray, b_boot: int, rng: np.random.Generator) -> Tuple[float, float]:
+def bootstrap_ci_delta(m_a: FloatArray, m_b: FloatArray, b_boot: int, rng: np.random.Generator) -> Tuple[float, float]:
     """
     95% percentile bootstrap CI for:
       delta = mean(m_a) - mean(m_b)
     where bootstrap resampling happens within each sampled embryo set.
     """
     n_a, n_b = m_a.size, m_b.size
-    ia = rng.integers(0, n_a, size=(b_boot, n_a))
-    ib = rng.integers(0, n_b, size=(b_boot, n_b))
-    d = m_a[ia].mean(axis=1) - m_b[ib].mean(axis=1)
+    ia: NDArray[np.int64] = np.asarray(rng.integers(0, n_a, size=(b_boot, n_a)), dtype=np.int64)
+    ib: NDArray[np.int64] = np.asarray(rng.integers(0, n_b, size=(b_boot, n_b)), dtype=np.int64)
+    d: FloatArray = np.asarray(m_a[ia].mean(axis=1) - m_b[ib].mean(axis=1), dtype=np.float64)
     lo = float(np.quantile(d, 0.025))
     hi = float(np.quantile(d, 0.975))
     return lo, hi
@@ -143,14 +147,14 @@ def bootstrap_ci_delta(m_a: np.ndarray, m_b: np.ndarray, b_boot: int, rng: np.ra
 
 def simulate_model_continuous(
     *,
-    m_a_obs: np.ndarray,
-    m_b_obs: np.ndarray,
+    m_a_obs: FloatArray,
+    m_b_obs: FloatArray,
     e_list: Sequence[int],
     delta_abs_grid: Sequence[float],
     r_outer: int,
     b_boot: int,
     rng: np.random.Generator,
-) -> List[Dict[str, object]]:
+) -> List[Dict[str, Any]]:
     """
     Simulate power surface for one model over (delta_abs, E).
 
@@ -159,9 +163,12 @@ def simulate_model_continuous(
     and set synthetic means by target shift.
     """
     mean_b = float(np.mean(m_b_obs))
-    res = np.concatenate([m_a_obs - np.mean(m_a_obs), m_b_obs - np.mean(m_b_obs)])
+    res: FloatArray = np.asarray(
+        np.concatenate([m_a_obs - np.mean(m_a_obs), m_b_obs - np.mean(m_b_obs)]),
+        dtype=np.float64,
+    )
 
-    rows: List[Dict[str, object]] = []
+    rows: List[Dict[str, Any]] = []
     for delta_abs in delta_abs_grid:
         # Convention: negative shift means slower condition A.
         delta_signed = -float(delta_abs)
@@ -171,8 +178,10 @@ def simulate_model_continuous(
             success = 0
             for _ in range(r_outer):
                 # Synthetic embryo-level draws for this virtual experiment.
-                m_a = mean_a + res[rng.integers(0, res.size, size=e)]
-                m_b = mean_b + res[rng.integers(0, res.size, size=e)]
+                idx_a: NDArray[np.int64] = np.asarray(rng.integers(0, res.size, size=e), dtype=np.int64)
+                idx_b: NDArray[np.int64] = np.asarray(rng.integers(0, res.size, size=e), dtype=np.int64)
+                m_a: FloatArray = np.asarray(mean_a + res[idx_a], dtype=np.float64)
+                m_b: FloatArray = np.asarray(mean_b + res[idx_b], dtype=np.float64)
 
                 lo, hi = bootstrap_ci_delta(m_a, m_b, b_boot=b_boot, rng=rng)
                 detected = (lo > 0.0) or (hi < 0.0)  # CI excludes 0
@@ -192,23 +201,23 @@ def simulate_model_continuous(
 
 def thresholds_from_surface(
     *,
-    rows: Sequence[Dict[str, object]],
+    rows: Sequence[Dict[str, Any]],
     e_list: Sequence[int],
     targets: Sequence[float],
-) -> List[Dict[str, object]]:
+) -> List[Dict[str, Any]]:
     """
     Convert row-level power surface -> threshold curves E80/E90/E95.
     """
     # Group by delta_abs.
-    by_delta: Dict[float, List[Dict[str, object]]] = {}
+    by_delta: Dict[float, List[Dict[str, Any]]] = {}
     for r in rows:
         d = float(r["delta_abs"])
         by_delta.setdefault(d, []).append(r)
 
-    out: List[Dict[str, object]] = []
+    out: List[Dict[str, Any]] = []
     for d in sorted(by_delta.keys()):
         rr = sorted(by_delta[d], key=lambda x: int(x["E_per_group"]))
-        row: Dict[str, object] = {
+        row: Dict[str, Any] = {
             "delta_abs": d,
             "delta_signed": -d,
         }
@@ -226,20 +235,20 @@ def thresholds_from_surface(
 
 def enforce_monotone_power_over_e(
     *,
-    rows: Sequence[Dict[str, object]],
-) -> List[Dict[str, object]]:
+    rows: Sequence[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     """
     Enforce monotonicity: power should be non-decreasing as E increases.
 
     This is a shape-constrained postprocessing step to reduce finite-simulation
     jitter near threshold boundaries.
     """
-    by_delta: Dict[float, List[Dict[str, object]]] = {}
+    by_delta: Dict[float, List[Dict[str, Any]]] = {}
     for r in rows:
         d = float(r["delta_abs"])
         by_delta.setdefault(d, []).append(dict(r))
 
-    out: List[Dict[str, object]] = []
+    out: List[Dict[str, Any]] = []
     for d in sorted(by_delta.keys()):
         rr = sorted(by_delta[d], key=lambda x: int(x["E_per_group"]))
         best = -1.0
@@ -254,10 +263,10 @@ def enforce_monotone_power_over_e(
 
 def enforce_monotone_thresholds_vs_delta(
     *,
-    rows: Sequence[Dict[str, object]],
+    rows: Sequence[Dict[str, Any]],
     targets: Sequence[float],
     e_max: int,
-) -> List[Dict[str, object]]:
+) -> List[Dict[str, Any]]:
     """
     Enforce monotonicity: required E should be non-increasing as |delta m| grows.
     """
@@ -288,7 +297,7 @@ def _svg_escape(text: str) -> str:
     )
 
 
-def _to_float_or_none(v: object) -> Optional[float]:
+def _to_float_or_none(v: Any) -> Optional[float]:
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -319,16 +328,16 @@ def _smooth_segment_monotone(
     if len(seg) < 3:
         return list(seg)
 
-    x = np.asarray([p[0] for p in seg], dtype=np.float64)
-    y = np.asarray([p[1] for p in seg], dtype=np.float64)
-    h = np.diff(x)
+    x: FloatArray = np.asarray([p[0] for p in seg], dtype=np.float64)
+    y: FloatArray = np.asarray([p[1] for p in seg], dtype=np.float64)
+    h: FloatArray = np.diff(x)
     if np.any(h <= 0):
         # Fallback to original points if x is not strictly increasing.
         return list(seg)
 
-    d = np.diff(y) / h
+    d: FloatArray = np.asarray(np.diff(y) / h, dtype=np.float64)
     n = len(x)
-    m = np.zeros(n, dtype=np.float64)
+    m: FloatArray = np.zeros(n, dtype=np.float64)
     m[0] = d[0]
     m[-1] = d[-1]
     for i in range(1, n - 1):
@@ -380,7 +389,7 @@ def write_svg_line_chart(
     x_max: float,
     y_min: float,
     y_max: float,
-    series: Sequence[Dict[str, object]],
+    series: Sequence[Dict[str, Any]],
     y_ticks: Sequence[float],
     footnote: str = "",
 ) -> None:
@@ -460,7 +469,7 @@ def write_svg_line_chart(
     for s in series:
         name = str(s["name"])
         color = str(s["color"])
-        pts: Sequence[Tuple[float, Optional[float]]] = s["points"]  # type: ignore[assignment]
+        pts = s["points"]
 
         # Split into contiguous segments (skip None gaps)
         seg: List[Tuple[float, float]] = []
@@ -558,8 +567,8 @@ def main() -> None:
 
     rng = np.random.default_rng(args.seed)
 
-    power_rows_all: List[Dict[str, object]] = []
-    thr_rows_all: List[Dict[str, object]] = []
+    power_rows_all: List[Dict[str, Any]] = []
+    thr_rows_all: List[Dict[str, Any]] = []
 
     for model in models:
         csv_a = outroot / args.a_test / model / "embryo.csv"
@@ -594,6 +603,9 @@ def main() -> None:
                 "pooled_residual_shift+bootstrap_CI_excludes_zero"
                 f"+monotone_powerE={args.enforce_monotone_power_e}"
             )
+            if "power_raw" not in r:
+                # Keep CSV schema stable even when monotone smoothing is disabled.
+                r["power_raw"] = r["power"]
             power_rows_all.append(r)
 
         thr_model = thresholds_from_surface(rows=rows_model, e_list=e_list, targets=targets)
@@ -653,7 +665,7 @@ def main() -> None:
     print("WROTE:", thr_csv)
 
     # Build lookup for plotting
-    by_model: Dict[str, Dict[float, Dict[str, object]]] = {}
+    by_model: Dict[str, Dict[float, Dict[str, Any]]] = {}
     for r in thr_rows_all:
         m = str(r["model"])
         d = float(r["delta_abs"])
@@ -666,7 +678,7 @@ def main() -> None:
         "nocons": "#E69F00",
         "full": "#D55E00",
     }
-    e80_series: List[Dict[str, object]] = []
+    e80_series: List[Dict[str, Any]] = []
     for m in models:
         pts: List[Tuple[float, Optional[float]]] = []
         for d in delta_abs_grid:
@@ -698,7 +710,7 @@ def main() -> None:
 
     # Plot 2: full model E80/E90/E95
     if "full" in by_model:
-        full_series: List[Dict[str, object]] = []
+        full_series: List[Dict[str, Any]] = []
         for key, color in [("E80", "#D55E00"), ("E90", "#0072B2"), ("E95", "#009E73")]:
             pts: List[Tuple[float, Optional[float]]] = []
             for d in delta_abs_grid:

@@ -148,11 +148,28 @@ bash scripts/reproduce_all.sh
 2. `scripts/10_infer_all.sh` — runs inference for 4 models (`cnn_single`, `meanpool`, `nocons`, `full`) on 2 test sets (`ID28C5_TEST`, `EXT25C_TEST`); produces per-embryo JSON under `.../<TAG>/<model>/json/*.json`; writes `OUTROOT/OUTROOT.txt`
 3. `scripts/20_aggregate_all.sh <OUTROOT>` — aggregates JSON into `points.csv`, `embryo.csv`, `summary.json`
 4. `scripts/30_ci_power_all.sh <OUTROOT>` — computes embryo-bootstrap CI and power curves
-5. `scripts/40_make_figures.sh <OUTROOT>` — generates publication figures (PNG + PDF)
-6. (optional) `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>` if `RUN_SALIENCY=1`
+5. `scripts/31_power_curve_continuous.sh <OUTROOT> <OUTROOT>/continuous_power` — continuous effect-size planning curves (`E80/E90/E95`)
+6. `scripts/11_cliplen_sensitivity.sh <OUTROOT>/cliplen_sensitivity` — fixed-checkpoint clip-length sensitivity (`L=4/12/24` by default)
+7. `scripts/12_cliplen_context_fit.sh <OUTROOT> <OUTROOT>/cliplen_sensitivity <OUTROOT>/cliplen_sensitivity/context_fit` — compact `0h/1h/3h/6h` context ladder and descriptive ETF-full fits
+8. `scripts/32_stage_error_bins.sh <OUTROOT> <OUTROOT>/stage_error/stage_error_by_bin.csv` — stage-stratified point-level error summary
+9. `scripts/33_anchor_sensitivity.sh <OUTROOT> <OUTROOT>/anchor_sensitivity` — T0 anchor sensitivity re-aggregation summary
+10. `scripts/40_make_figures.sh <OUTROOT>` — generates publication figures (PNG + PDF)
+11. (optional) `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>` if `RUN_SALIENCY=1`
 
 Output root directory (OUTROOT):
 - `runs/paper_eval_YYYYMMDD_HHMMSS/`
+
+Default optional-analysis behavior in `reproduce_all.sh`:
+- `RUN_CONTINUOUS_POWER=1`
+- `RUN_CLIPLEN_SENSITIVITY=1`
+- `RUN_STAGE_ERROR_BINS=1`
+- `RUN_ANCHOR_SENSITIVITY=1`
+- `RUN_SALIENCY=0`
+
+To skip the extra revision analyses:
+```bash
+RUN_CONTINUOUS_POWER=0 RUN_CLIPLEN_SENSITIVITY=0 RUN_STAGE_ERROR_BINS=0 RUN_ANCHOR_SENSITIVITY=0 bash scripts/reproduce_all.sh
+```
 
 ---
 
@@ -180,6 +197,11 @@ Under `runs/paper_eval_YYYYMMDD_HHMMSS/`:
 - `continuous_power/continuous_thresholds_by_model.csv` — E80/E90/E95 threshold curves over `|delta m|`
 - `continuous_power/continuous_E80_by_model.svg` — all-model E80 curve
 - `continuous_power/continuous_full_E80_E90_E95.svg` — full-model E80/E90/E95 curves
+- `cliplen_sensitivity/cliplen_summary.csv` — fixed-checkpoint clip-length sensitivity summary (optional)
+- `cliplen_sensitivity/context_fit/context_ladder.csv` — 0h/1h/3h/6h context ladder summary (optional)
+- `cliplen_sensitivity/context_fit/full_context_fit.csv` — descriptive ETF-full 1/3/6h linear fits (optional)
+- `stage_error/stage_error_by_bin.csv` — stage-stratified point-level error summary (optional)
+- `anchor_sensitivity/anchor_sensitivity_summary.csv` — T0 anchor sensitivity summary (optional)
 
 **Figures**
 - `figures_jobs/` — publication figures (PNG + PDF)
@@ -189,11 +211,24 @@ Under `runs/paper_eval_YYYYMMDD_HHMMSS/`:
 
 Models (`<model>`): `cnn_single`, `meanpool`, `nocons`, `full`.
 
+Thin-shell note:
+- shell entrypoints under `scripts/` are orchestration wrappers only
+- dataset/model enumeration and per-embryo scheduling now live in Python (`analysis/run_infer_matrix.py`, `analysis/run_cliplen_sensitivity.py`, `analysis/select_best_embryo.py`)
+
+Common overrides for `scripts/10_infer_all.sh`:
+```bash
+OUTROOT=./runs/paper_eval_manual \
+DATASETS=ID28C5_TEST \
+MODELS=full \
+bash scripts/10_infer_all.sh
+```
+
 ---
 
 ## Optional: Continuous effect-size planning curve
 
 This extends sample-efficiency analysis from discrete effect bins to a continuous range.
+It is already run by default inside `scripts/reproduce_all.sh` unless `RUN_CONTINUOUS_POWER=0`.
 
 Default dense setup used for revision:
 - `|delta m| = 0.00 .. 0.10` with step `0.002`
@@ -207,6 +242,22 @@ Statistical definition:
 - default `A=EXT25C_TEST`, `B=ID28C5_TEST`
 - detection rule: embryo-bootstrap 95% CI excludes 0
 
+Preferred shell entrypoint:
+```bash
+bash scripts/31_power_curve_continuous.sh \
+  runs/paper_eval_20260225_232506 \
+  runs/paper_eval_20260225_232506/continuous_power
+```
+
+Useful environment overrides:
+```bash
+MODELS=cnn_single,meanpool,nocons,full \
+DELTA_MAX=0.10 DELTA_STEP=0.002 \
+R_OUTER=1200 B_BOOT=800 SEED=20260310 \
+bash scripts/31_power_curve_continuous.sh
+```
+
+Direct Python invocation remains available if needed:
 ```bash
 python analysis/power_curve_continuous.py \
   --outroot runs/paper_eval_20260225_232506 \
@@ -236,6 +287,155 @@ Plot notes:
 - Markers remain the actual grid-point values.
 - Axis display can start at 0, but inferentially valid designs still follow `E_list` (typically `E>=2`).
 - Near-zero `|delta m|` may show `>max(E_list)` (rendered as gaps).
+
+---
+
+## Optional: Clip-length sensitivity and context ladder
+
+This analysis answers a different question from the power curve:
+- hold the underlying acquisition interval fixed at `15 min`
+- vary only the inference clip length (`L=4/12/24` by default)
+- summarize the practical context ladder as `0h` (`cnn_single`) vs `1h/3h/6h` (`ETF-full`)
+
+This is also run by default inside `scripts/reproduce_all.sh` unless `RUN_CLIPLEN_SENSITIVITY=0`.
+
+### Step 1: Run fixed-checkpoint clip-length sensitivity
+Preferred shell entrypoint:
+```bash
+bash scripts/11_cliplen_sensitivity.sh
+```
+
+Write to a fixed directory:
+```bash
+bash scripts/11_cliplen_sensitivity.sh runs/cliplen_sensitivity_main
+```
+
+Common overrides:
+```bash
+DATASETS=ID28C5_TEST,EXT25C_TEST \
+MODELS=full \
+CLIP_LENS=4,12,24 \
+bash scripts/11_cliplen_sensitivity.sh
+```
+
+Main outputs:
+- `<OUTROOT>/cliplen_summary.csv`
+- `<OUTROOT>/L04/...`, `<OUTROOT>/L12/...`, `<OUTROOT>/L24/...`
+
+### Step 2: Summarize as a compact 0h/1h/3h/6h context ladder
+Preferred shell entrypoint:
+```bash
+bash scripts/12_cliplen_context_fit.sh \
+  runs/paper_eval_20260225_232506 \
+  runs/cliplen_sensitivity_20260311_030252
+```
+
+This writes:
+- `<CLIPLEN_OUTROOT>/context_fit/context_ladder.csv`
+- `<CLIPLEN_OUTROOT>/context_fit/full_context_fit.csv`
+
+Direct Python invocation remains available:
+```bash
+python analysis/cliplen_context_fit.py \
+  --main_outroot runs/paper_eval_20260225_232506 \
+  --cliplen_csv runs/cliplen_sensitivity_20260311_030252/cliplen_summary.csv \
+  --out_dir runs/cliplen_sensitivity_20260311_030252/context_fit
+```
+
+Interpretation notes:
+- `cnn_single` is the `0h` image-only reference and is not mixed into ETF-full linear fits.
+- ETF-full fits are descriptive only and use the `1h/3h/6h` ladder (`L=4/12/24`).
+- This is fixed-checkpoint sensitivity (`24-frame-trained -> shorter-context inference`), not dedicated `4-train-4-test` or `12-train-12-test` retraining.
+
+---
+
+## Optional: Stage-stratified error bins
+
+This summarizes where point-level errors concentrate along the nominal timeline.
+It is already run by default inside `scripts/reproduce_all.sh` unless `RUN_STAGE_ERROR_BINS=0`.
+
+Preferred shell entrypoint:
+```bash
+bash scripts/32_stage_error_bins.sh \
+  runs/paper_eval_20260225_232506 \
+  runs/paper_eval_20260225_232506/stage_error/stage_error_by_bin.csv
+```
+
+Common overrides:
+```bash
+DATASETS=ID28C5_TEST,EXT25C_TEST \
+MODELS=cnn_single,full \
+SCHEME=kimmel_start \
+bash scripts/32_stage_error_bins.sh
+```
+
+Use fixed custom edges only if you explicitly want non-Kimmel bins:
+```bash
+DATASETS=ID28C5_TEST,EXT25C_TEST \
+MODELS=cnn_single,full \
+SCHEME=fixed \
+BINS=4.5,12.5,20.5,28.5,36.5,46.5 \
+bash scripts/32_stage_error_bins.sh
+```
+
+Direct Python invocation remains available:
+```bash
+python analysis/stage_error_bins.py \
+  --outroot runs/paper_eval_20260225_232506 \
+  --datasets ID28C5_TEST,EXT25C_TEST \
+  --models cnn_single,full \
+  --scheme kimmel_start \
+  --out_csv runs/paper_eval_20260225_232506/stage_error/stage_error_by_bin.csv
+```
+
+Output:
+- `stage_error/stage_error_by_bin.csv`
+
+Interpretation note:
+- This is descriptive point-level stratification from `points.csv`; inferential claims should still remain embryo-level.
+- By default, bins follow broad Kimmel periods and are indexed by nominal clip *start* time (`x_true`), not clip end time.
+- Therefore the latest nominal time in the table is the latest available clip start (for the main benchmark, `46.5 hpf`), even though the last `L=24` windows still contain imagery extending to approximately `52.25 hpf`.
+
+---
+
+## Optional: T0 anchor sensitivity
+
+This re-aggregates existing per-embryo inference JSONs under alternative `T0`
+anchors without retraining, to quantify how anchored tempo summaries change when
+the acquisition-defined start time is shifted.
+It is already run by default inside `scripts/reproduce_all.sh` unless
+`RUN_ANCHOR_SENSITIVITY=0`.
+
+Preferred shell entrypoint:
+```bash
+bash scripts/33_anchor_sensitivity.sh \
+  runs/paper_eval_20260225_232506 \
+  runs/paper_eval_20260225_232506/anchor_sensitivity
+```
+
+Common overrides:
+```bash
+DATASETS=ID28C5_TEST,EXT25C_TEST \
+MODELS=cnn_single,meanpool,nocons,full \
+T0_LIST=4.0,4.5,5.0 \
+bash scripts/33_anchor_sensitivity.sh
+```
+
+Direct Python summary remains available after aggregation:
+```bash
+python analysis/anchor_sensitivity.py \
+  --outdir runs/paper_eval_20260225_232506/anchor_sensitivity \
+  --datasets ID28C5_TEST,EXT25C_TEST \
+  --models cnn_single,meanpool,nocons,full \
+  --out_csv runs/paper_eval_20260225_232506/anchor_sensitivity/anchor_sensitivity_summary.csv
+```
+
+Output:
+- `anchor_sensitivity/anchor_sensitivity_summary.csv`
+
+Interpretation note:
+- This is an analysis-time sensitivity study only; model weights are unchanged.
+- In this project, `T0=4.5 hpf` is the acquisition-defined dataset start, not a claim that `4.5 hpf` is a uniquely optimal biological anchor for all datasets.
 
 ---
 
@@ -400,6 +600,52 @@ python3 src/EmbryoTempoFormer.py preprocess \
 - Resize to `384x384` (PIL bilinear)
 - Pad/trim time axis to `192` frames
 - Store one `.npy` per embryo
+
+## Optional: Import S-BIAD840 Princeton PNG export
+
+`S-BIAD840` is not laid out as one stack file per embryo. Instead, each time point
+is a directory (`Dataset_C/<time_hpf>/`, `Dataset_D/<time_hpf>/`) containing 96
+PNG frames, one per embryo. To make this external dataset compatible with the ETF
+release pipeline, we first reassemble one time-ordered stack per embryo and then
+apply the **same** ETF preprocessing steps (`p_lo=1`, `p_hi=99`, resize to
+`384x384`, pad/trim to `192` frames).
+
+For compatibility with the released checkpoints, the helper below aligns both
+conditions to `4.5 hpf` before preprocessing. This means:
+
+- `Dataset_C` (28.5C) drops the first 4 frames (`3.5 -> 4.25 hpf`)
+- `Dataset_D` (25C) drops the first 8 frames (`2.5 -> 4.25 hpf`)
+- both then keep `168` real frames (`4.5 -> 46.25 hpf`)
+
+By default, this external-domain import **does not** pad to `192` frames. This
+is intentional: ETF inference only requires `T >= clip_len`, so keeping the
+native aligned length avoids injecting synthetic repeated-tail windows into a
+cross-domain test set. If you explicitly want release-style fixed-length arrays,
+set `PAD_TO_EXPECT=1`.
+
+Run:
+
+```bash
+bash scripts/34_preprocess_sbiad840.sh
+bash scripts/34_preprocess_sbiad840.sh ./data/sbiad840_aligned_4p5
+```
+
+Key environment overrides:
+
+```bash
+SBIAD840_SRC_ROOT=/ABS/PATH/TO/s-biad840/Files/Princeton_Data
+SBIAD840_OUT_ROOT=./data/sbiad840_aligned_4p5
+ALIGN_START_HPF=4.5
+PAD_TO_EXPECT=0
+LIMIT=0
+```
+
+Outputs:
+
+- `processed_28C5_sbiad840/*.npy`
+- `processed_25C_sbiad840/*.npy`
+- `splits/28C5_sbiad840_test.json`
+- `splits/25C_sbiad840_test.json`
 
 ---
 

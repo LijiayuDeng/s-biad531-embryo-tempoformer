@@ -37,6 +37,7 @@ fi
 
 DT="${DT_H:-0.25}"
 T0="${T0_HPF:-4.5}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 # auto-pick OUTROOT if missing
 if [ -z "$OUTROOT" ]; then
@@ -94,7 +95,7 @@ for ds in "${datasets[@]}"; do
     echo "[AGG] $ds / $m  (json=$njson)"
     mkdir -p "$OUT_DIR"
 
-    python3 "$AGG_SCRIPT" \
+    "$PYTHON_BIN" "$AGG_SCRIPT" \
       --json_dir "$JSON_DIR" \
       --out_dir  "$OUT_DIR" \
       --dt "$DT" \

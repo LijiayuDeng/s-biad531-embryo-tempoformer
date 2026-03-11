@@ -1,75 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source .env
 
-PY="python3 src/EmbryoTempoFormer.py"
+# Thin orchestration wrapper for multi-dataset / multi-model inference.
+#
+# Usage:
+#   bash scripts/10_infer_all.sh
+#   bash scripts/10_infer_all.sh ./runs/paper_eval_manual
+#
+# Common overrides:
+#   DATASETS=ID28C5_TEST
+#   MODELS=full
+#   PYTHON_BIN=python
+#   OUTROOT=./runs/paper_eval_manual
 
-AMP_FLAG="--no-amp";  [ "${AMP:-0}" = "1" ] && AMP_FLAG="--amp"
-EMA_FLAG="--no-use_ema"; [ "${USE_EMA:-0}" = "1" ] && EMA_FLAG="--use_ema"
+if [ -f ".env" ]; then
+  # shellcheck disable=SC1091
+  source .env
+else
+  echo "[ERR] .env not found. Run: cp .env.example .env and edit paths."
+  exit 1
+fi
 
-stamp="$(date +%Y%m%d_%H%M%S)"
-OUTROOT="${RUNS_DIR:-./runs}/paper_eval_${stamp}"
-mkdir -p "$OUTROOT"
-echo "[INFO] OUTROOT=$OUTROOT"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+OUTROOT="${1:-${OUTROOT:-}}"
 
-models=(cnn_single meanpool nocons full)
-
-ckpt_of () {
-  case "$1" in
-    cnn_single) echo "$CKPT_CNN_SINGLE" ;;
-    meanpool) echo "$CKPT_MEANPOOL" ;;
-    nocons) echo "$CKPT_NOCONS" ;;
-    full) echo "$CKPT_FULL" ;;
-  esac
-}
-
-infer_one () {
-  local PROC="$1" EID="$2" OUT="$3" CKPT="$4"
-  local IN="$PROC/$EID.npy"
-  [ -f "$IN" ] || { echo "[WARN] missing $IN"; return; }
-  [ -f "$OUT" ] && return
-  $PY infer \
-    --ckpt "$CKPT" \
-    --input_path "$IN" \
-    --out_json "$OUT" \
-    --clip_len "${CLIP_LEN:-24}" \
-    --img_size "${IMG_SIZE:-384}" \
-    --expect_t "${EXPECT_T:-192}" \
-    --stride "${STRIDE:-8}" \
-    --trim 0.2 \
-    --device "${DEVICE:-auto}" $AMP_FLAG $EMA_FLAG \
-    --batch_size "${BATCH_SIZE:-64}" --num_workers 0 \
-    --mem_profile lowmem \
-    >/dev/null
-}
-
-# datasets: tag|proc|split|key
-datasets=(
-  "ID28C5_TEST|$PROC_28C5|$SPLIT_28C5|test"
-  "EXT25C_TEST|$PROC_25C|$SPLIT_25C|test"
-)
-
-for ds in "${datasets[@]}"; do
-  IFS="|" read -r TAG PROC SPLIT KEY <<<"$ds"
-  for model in "${models[@]}"; do
-    CKPT="$(ckpt_of "$model")"
-    OUTDIR="$OUTROOT/$TAG/$model/json"
-    mkdir -p "$OUTDIR"
-
-    echo "[RUN] infer $TAG $model"
-    while read -r eid; do
-      [ -z "$eid" ] && continue
-      infer_one "$PROC" "$eid" "$OUTDIR/$eid.json" "$CKPT"
-    done < <(python3 - <<PY
-import json
-sp=json.load(open("$SPLIT","r"))
-for eid in sp["$KEY"]:
-    print(eid)
-PY
-)
-  done
-done
-
-echo "[DONE] infer json in $OUTROOT"
-echo "$OUTROOT" > "$OUTROOT/OUTROOT.txt"
+"$PYTHON_BIN" analysis/run_infer_matrix.py \
+  --outroot "$OUTROOT" \
+  --datasets "${DATASETS:-ID28C5_TEST,EXT25C_TEST}" \
+  --models "${MODELS:-cnn_single,meanpool,nocons,full}" \
+  --clip_len "${CLIP_LEN:-24}" \
+  --img_size "${IMG_SIZE:-384}" \
+  --expect_t "${EXPECT_T:-192}" \
+  --stride "${STRIDE:-8}" \
+  --device "${DEVICE:-auto}" \
+  --amp "${AMP:-1}" \
+  --use_ema "${USE_EMA:-1}" \
+  --batch_size "${BATCH_SIZE:-64}" \
+  --proc_28c5 "$PROC_28C5" \
+  --proc_25c "$PROC_25C" \
+  --split_28c5 "$SPLIT_28C5" \
+  --split_25c "$SPLIT_25C" \
+  --ckpt_cnn_single "$CKPT_CNN_SINGLE" \
+  --ckpt_meanpool "$CKPT_MEANPOOL" \
+  --ckpt_nocons "$CKPT_NOCONS" \
+  --ckpt_full "$CKPT_FULL"

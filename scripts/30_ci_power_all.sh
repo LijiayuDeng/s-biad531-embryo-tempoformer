@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-source .env
+
+if [ -f ".env" ]; then
+  # shellcheck disable=SC1091
+  source .env
+else
+  echo "[ERR] .env not found. Run: cp .env.example .env and edit paths."
+  exit 1
+fi
 
 OUTROOT="${1:-}"
 [ -d "$OUTROOT" ] || { echo "[ERR] Usage: $0 <OUTROOT>"; exit 1; }
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
 for model in cnn_single meanpool nocons full; do
   A="$OUTROOT/EXT25C_TEST/$model/embryo.csv"
@@ -14,14 +22,14 @@ for model in cnn_single meanpool nocons full; do
 
   echo "== CI & POWER for $model =="
 
-  python3 analysis/ci_delta_m.py \
+  "$PYTHON_BIN" analysis/ci_delta_m.py \
     --csv_a "$A" --csv_b "$B" \
     --label_a 25C --label_b 28C5 \
     --m_col m_anchor \
     --B 5000 --seed 0 \
     --out_json "$OUTROOT/CI_${model}_m_anchor.json"
 
-  python3 analysis/power_curve.py \
+  "$PYTHON_BIN" analysis/power_curve.py \
     --csv_a "$A" --csv_b "$B" \
     --label_a 25C --label_b 28C5 \
     --m_col m_anchor \

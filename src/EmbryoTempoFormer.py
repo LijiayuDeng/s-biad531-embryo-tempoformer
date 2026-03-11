@@ -104,6 +104,8 @@ try:
 except Exception:
     TVF = None
 
+from preprocess_utils import jdump, pad_or_trim_T, percentile_clip_to_u8, preprocess_stack, resize_stack_u8, save_proc_npy
+
 
 # ---------------------------------------------------------------------
 # Public identity
@@ -161,13 +163,6 @@ MEM_PROFILES = {
 def now_str() -> str:
     """Return local timestamp string for logs/metadata."""
     return time.strftime("%Y%m%d-%H%M%S", time.localtime())
-
-
-def jdump(obj: Any, path: Path) -> None:
-    """Write JSON to `path` (UTF-8), creating parent directories if needed."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(obj, f, indent=2, ensure_ascii=False)
 
 
 def jload(path: str | Path) -> Any:
@@ -419,90 +414,6 @@ def read_tiff_stack(path: str | Path, max_pages: Optional[int] = None) -> np.nda
         if a.shape != s0:
             raise ValueError(f"Inconsistent TIFF pages: {s0} vs {a.shape} at {i}")
     return np.stack(arrs, axis=0)
-
-
-def percentile_clip_to_u8(arr: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.0) -> Tuple[np.ndarray, Dict[str, float]]:
-    """
-    Percentile clip and normalize to uint8.
-
-    Returns:
-      u8: uint8 array with values in [0,255]
-      meta: dict with actual intensity clip thresholds
-    """
-    lo = float(np.percentile(arr, p_lo))
-    hi = float(np.percentile(arr, p_hi))
-    if hi <= lo + 1e-12:
-        hi = lo + 1.0
-    x = np.clip(arr.astype(np.float32), lo, hi)
-    x = (x - lo) / (hi - lo + 1e-12)
-    x = np.clip(x, 0.0, 1.0)
-    u8 = (x * 255.0 + 0.5).astype(np.uint8)
-    return u8, {"p_lo": lo, "p_hi": hi}
-
-
-def resize_stack_u8(frames_u8: np.ndarray, img_size: int) -> np.ndarray:
-    """
-    Resize uint8 stack [T,H,W] to [T,img_size,img_size] using PIL bilinear.
-
-    Requires Pillow (PIL).
-    """
-    if frames_u8.ndim != 3 or frames_u8.dtype != np.uint8:
-        raise ValueError("Expected uint8 [T,H,W]")
-    T, H, W = frames_u8.shape
-    if H == img_size and W == img_size:
-        return frames_u8
-    if Image is None:
-        raise RuntimeError("PIL not installed for resizing")
-    out = []
-    for t in range(T):
-        im = Image.fromarray(frames_u8[t])
-        im = im.resize((img_size, img_size), resample=Image.BILINEAR)
-        out.append(np.asarray(im, dtype=np.uint8))
-    return np.stack(out, axis=0)
-
-
-def pad_or_trim_T(frames_u8: np.ndarray, expect_t: int) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """
-    Ensure time dimension equals expect_t by trimming or repeating the last frame.
-
-    Returns:
-      frames2: [expect_t,H,W] uint8
-      meta: describes original T and action taken
-    """
-    T = int(frames_u8.shape[0])
-    meta = {"orig_T": T, "expect_t": int(expect_t), "action": "none"}
-    if T == expect_t:
-        return frames_u8, meta
-    if T > expect_t:
-        meta["action"] = "trim"
-        return frames_u8[:expect_t], meta
-    meta["action"] = "pad_last"
-    pad = expect_t - T
-    last = frames_u8[-1:]
-    frames2 = np.concatenate([frames_u8, np.repeat(last, pad, axis=0)], axis=0)
-    return frames2, meta
-
-
-def preprocess_stack(raw: np.ndarray, expect_t: int, img_size: int, p_lo: float = 1.0, p_hi: float = 99.0) -> Tuple[np.ndarray, Dict[str, Any]]:
-    """
-    Full preprocessing pipeline for one raw stack.
-
-    Returns:
-      proc_u8: [expect_t,img_size,img_size] uint8
-      meta: preprocessing metadata (intensity clip thresholds, padding/trim info)
-    """
-    u8, clip_meta = percentile_clip_to_u8(raw, p_lo=p_lo, p_hi=p_hi)
-    u8 = resize_stack_u8(u8, img_size=img_size)
-    u8, t_meta = pad_or_trim_T(u8, expect_t=expect_t)
-    return u8, {"clip": clip_meta, "t": t_meta, "img_size": int(img_size)}
-
-
-def save_proc_npy(proc_dir: Path, eid: str, frames_u8: np.ndarray) -> Path:
-    """Save processed uint8 stack to proc_dir/eid.npy."""
-    proc_dir.mkdir(parents=True, exist_ok=True)
-    out = proc_dir / f"{eid}.npy"
-    np.save(out, frames_u8, allow_pickle=False)
-    return out
 
 
 def load_frames_memmap(proc_dir: Path, eid: str) -> np.ndarray:
