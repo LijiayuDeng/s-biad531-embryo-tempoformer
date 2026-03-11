@@ -171,6 +171,10 @@ To skip the extra revision analyses:
 RUN_CONTINUOUS_POWER=0 RUN_CLIPLEN_SENSITIVITY=0 RUN_STAGE_ERROR_BINS=0 RUN_ANCHOR_SENSITIVITY=0 bash scripts/reproduce_all.sh
 ```
 
+Thin-shell note:
+- `scripts/reproduce_all.sh` is now only a wrapper around `analysis/run_reproduction_pipeline.py`
+- matrix traversal and optional-stage branching live in Python, not shell
+
 ---
 
 ## Expected outputs
@@ -213,7 +217,7 @@ Models (`<model>`): `cnn_single`, `meanpool`, `nocons`, `full`.
 
 Thin-shell note:
 - shell entrypoints under `scripts/` are orchestration wrappers only
-- dataset/model enumeration and per-embryo scheduling now live in Python (`analysis/run_infer_matrix.py`, `analysis/run_cliplen_sensitivity.py`, `analysis/select_best_embryo.py`)
+- dataset/model enumeration, per-embryo scheduling, env checking, aggregation, CI/power matrix traversal, and top-level pipeline branching now live in Python (`analysis/check_env.py`, `analysis/run_infer_matrix.py`, `analysis/aggregate_matrix.py`, `analysis/run_ci_power_matrix.py`, `analysis/run_cliplen_sensitivity.py`, `analysis/select_best_embryo.py`, `analysis/run_reproduction_pipeline.py`)
 
 Common overrides for `scripts/10_infer_all.sh`:
 ```bash
@@ -670,7 +674,7 @@ python3 src/EmbryoTempoFormer.py infer -h
 - **Import/module errors:** ensure dependencies installed (`pip install -r requirements.txt`).
 - **PyTorch GPU/CUDA:** `pip install -r requirements.txt` typically installs CPU build; for GPU, follow official PyTorch instructions for your platform.
 - **GPU/CUDA numeric variability:** exact determinism not guaranteed across hardware/software stacks.
-- **`RUNS_DIR` confusion:** keep `RUNS_DIR=./runs` when using `scripts/reproduce_all.sh` (it scans `./runs/paper_eval_*` to find OUTROOT).
+- **`RUNS_DIR` confusion:** keep `RUNS_DIR=./runs` unless you intentionally want outputs elsewhere; `scripts/reproduce_all.sh` now passes the chosen `OUTROOT` through Python orchestration rather than scanning `./runs/paper_eval_*`.
 - **Out-of-memory (OOM) during training:** paper reproduction does not require training; if training needed, use `mem_profile=lowmem` as in released checkpoints.
 
 ---
@@ -812,11 +816,32 @@ bash scripts/reproduce_all.sh
 2. `scripts/10_infer_all.sh` — 对 4 个模型（`cnn_single`, `meanpool`, `nocons`, `full`）在 2 个测试集（`ID28C5_TEST`, `EXT25C_TEST`）上运行推理；输出 per-embryo JSON 到 `.../<TAG>/<model>/json/*.json`；写入 `OUTROOT/OUTROOT.txt`
 3. `scripts/20_aggregate_all.sh <OUTROOT>` — 聚合 JSON 为 `points.csv`, `embryo.csv`, `summary.json`
 4. `scripts/30_ci_power_all.sh <OUTROOT>` — 计算胚胎 bootstrap CI 与 power 曲线
-5. `scripts/40_make_figures.sh <OUTROOT>` — 生成论文图（PNG + PDF）
-6. （可选）若 `RUN_SALIENCY=1`，运行 `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>`
+5. `scripts/31_power_curve_continuous.sh <OUTROOT> <OUTROOT>/continuous_power` — 连续效应量规划曲线（`E80/E90/E95`）
+6. `scripts/11_cliplen_sensitivity.sh <OUTROOT>/cliplen_sensitivity` — 固定 checkpoint 的 clip 长度敏感性
+7. `scripts/12_cliplen_context_fit.sh <OUTROOT> <OUTROOT>/cliplen_sensitivity <OUTROOT>/cliplen_sensitivity/context_fit` — `0h/1h/3h/6h` context ladder 与 ETF-full 描述性拟合
+8. `scripts/32_stage_error_bins.sh <OUTROOT> <OUTROOT>/stage_error/stage_error_by_bin.csv` — 分期误差汇总
+9. `scripts/33_anchor_sensitivity.sh <OUTROOT> <OUTROOT>/anchor_sensitivity` — T0 锚点敏感性汇总
+10. `scripts/40_make_figures.sh <OUTROOT>` — 生成论文图（PNG + PDF）
+11. （可选）若 `RUN_SALIENCY=1`，运行 `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>`
 
 输出根目录（OUTROOT）：
 - `runs/paper_eval_YYYYMMDD_HHMMSS/`
+
+说明：
+- `scripts/reproduce_all.sh` 现在只是 `analysis/run_reproduction_pipeline.py` 的薄包装层
+- 流程分支、可选分析开关和 OUTROOT 传递已经收敛到 Python 侧
+
+`reproduce_all.sh` 默认会启用的可选分析：
+- `RUN_CONTINUOUS_POWER=1`
+- `RUN_CLIPLEN_SENSITIVITY=1`
+- `RUN_STAGE_ERROR_BINS=1`
+- `RUN_ANCHOR_SENSITIVITY=1`
+- `RUN_SALIENCY=0`
+
+如需跳过本轮修回新增分析：
+```bash
+RUN_CONTINUOUS_POWER=0 RUN_CLIPLEN_SENSITIVITY=0 RUN_STAGE_ERROR_BINS=0 RUN_ANCHOR_SENSITIVITY=0 bash scripts/reproduce_all.sh
+```
 
 ---
 
@@ -840,6 +865,15 @@ bash scripts/reproduce_all.sh
 - `CI_<model>_m_anchor.json` — delta-m 的胚胎 bootstrap 95% 置信区间（由 `embryo.csv` 计算）
 - `power_<model>_m_anchor.csv` — power 曲线数据
 - `power_<model>_m_anchor.png` — power 曲线图
+- `continuous_power/continuous_power_by_model.csv` — 连续效应量功效面（可选）
+- `continuous_power/continuous_thresholds_by_model.csv` — `|delta m|` 上的 E80/E90/E95 阈值曲线（可选）
+- `continuous_power/continuous_E80_by_model.svg` — 全模型 E80 曲线（可选）
+- `continuous_power/continuous_full_E80_E90_E95.svg` — `full` 模型 E80/E90/E95 曲线（可选）
+- `cliplen_sensitivity/cliplen_summary.csv` — 固定 checkpoint 的 clip 长度敏感性汇总（可选）
+- `cliplen_sensitivity/context_fit/context_ladder.csv` — `0h/1h/3h/6h` context ladder 汇总（可选）
+- `cliplen_sensitivity/context_fit/full_context_fit.csv` — ETF-full 在 `1/3/6h` 上的描述性直线拟合（可选）
+- `stage_error/stage_error_by_bin.csv` — 按 Kimmel 分期的点级误差汇总（可选）
+- `anchor_sensitivity/anchor_sensitivity_summary.csv` — T0 锚点敏感性汇总（可选）
 
 **论文图**
 - `figures_jobs/` — 论文图（PNG + PDF）
@@ -848,6 +882,17 @@ bash scripts/reproduce_all.sh
 - `OUTROOT.txt` — 记录 OUTROOT 路径（由 `scripts/10_infer_all.sh` 写入）
 
 模型（`<model>`）：`cnn_single`, `meanpool`, `nocons`, `full`。
+
+Thin-shell 说明：
+- `scripts/` 下的 shell 入口只负责环境加载、默认参数和一键编排
+- dataset/model 矩阵遍历、胚胎级调度、环境检查、aggregation、CI/power 批处理、以及顶层 pipeline 分支控制已经收敛到 Python：
+  - `analysis/check_env.py`
+  - `analysis/run_infer_matrix.py`
+  - `analysis/aggregate_matrix.py`
+  - `analysis/run_ci_power_matrix.py`
+  - `analysis/run_cliplen_sensitivity.py`
+  - `analysis/select_best_embryo.py`
+  - `analysis/run_reproduction_pipeline.py`
 
 ---
 
@@ -1036,7 +1081,7 @@ python3 src/EmbryoTempoFormer.py infer -h
 - **依赖缺失/ImportError：**确认在当前环境执行过 `pip install -r requirements.txt`。
 - **PyTorch GPU/CUDA 安装：**`pip install -r requirements.txt` 通常安装 CPU 版本；如需 GPU，请按 PyTorch 官方指南安装匹配版本。
 - **GPU/CUDA 数值非确定性：**不同硬件/驱动/库组合下可能出现轻微数值差异。
-- **`RUNS_DIR` 说明：**使用 `scripts/reproduce_all.sh` 时保持 `RUNS_DIR=./runs`（脚本通过扫描 `./runs/paper_eval_*` 来确定 OUTROOT）。
+- **`RUNS_DIR` 说明：**通常保持 `RUNS_DIR=./runs`；`scripts/reproduce_all.sh` 现在通过 Python 编排显式传递 `OUTROOT`，不再依赖扫描 `./runs/paper_eval_*`。
 - **训练 OOM：**论文复现不需要训练；如需训练，请参考发布 checkpoint 的 cfg（例如 `mem_profile=lowmem`）。
 
 ---

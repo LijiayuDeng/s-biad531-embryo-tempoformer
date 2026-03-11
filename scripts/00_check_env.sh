@@ -7,22 +7,9 @@ if [ ! -f ".env" ]; then
   exit 1
 fi
 
+set -a
+# shellcheck disable=SC1091
 source .env
-
-req_vars=(
-  PROC_28C5 PROC_25C SPLIT_28C5 SPLIT_25C
-  CKPT_CNN_SINGLE CKPT_MEANPOOL CKPT_NOCONS CKPT_FULL
-)
-
-for v in "${req_vars[@]}"; do
-  if [ -z "${!v:-}" ]; then
-    echo "[ERR] missing env var: $v"
-    exit 1
-  fi
-done
-
-echo "== check paths =="
-ls -ld "$PROC_28C5" "$PROC_25C" "$SPLIT_28C5" "$SPLIT_25C" >/dev/null
-ls -lh "$CKPT_CNN_SINGLE" "$CKPT_MEANPOOL" "$CKPT_NOCONS" "$CKPT_FULL" >/dev/null
-
-echo "[OK] env + paths look good"
+set +a
+PYTHON_BIN="${PYTHON_BIN:-python}"
+"$PYTHON_BIN" analysis/check_env.py
