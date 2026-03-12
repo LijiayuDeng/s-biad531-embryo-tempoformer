@@ -9,7 +9,8 @@ EmbryoTempoFormer (ETF) is a **paper-grade reproducible pipeline** for:
 **Links**
 - **Code repo:** https://github.com/LijiayuDeng/s-biad531-embryo-tempoformer
 - **Zenodo reproducibility bundle (FULL processed + checkpoints + splits):** https://doi.org/10.5281/zenodo.18318139
-- **Optional Princeton processed bundle (external-domain `S-BIAD840` import, if provided separately):** place as `data/sbiad840_aligned_4p5/` inside this repo after extraction
+- **Optional Princeton processed bundle (external-domain `S-BIAD840` import):** https://doi.org/10.5281/zenodo.18979476
+  Extract it as `data/sbiad840_aligned_4p5/` inside this repo.
 - **Raw data source:** BioImage Archive accession **S-BIAD531**
   https://www.ebi.ac.uk/bioimage-archive/galleries/S-BIAD531.html
 
@@ -75,6 +76,9 @@ embryo-tempoformer_release_v1/
 If you also want to reproduce the Princeton external-domain analyses (`Comment 8`),
 extract the optional processed Princeton bundle **inside this repository** so that
 it becomes:
+
+- `sbiad840_aligned_4p5.tar.gz`
+  https://doi.org/10.5281/zenodo.18979476
 
 ```text
 s-biad531-embryo-tempoformer/
@@ -1076,6 +1080,9 @@ embryo-tempoformer_release_v1/
 
 如果你还希望复现 Princeton 外部域分析（`Comment 8`），则把可选的
 Princeton 处理后数据包也解压到**仓库内部**，使其目录结构变成：
+
+- `sbiad840_aligned_4p5.tar.gz`
+  https://doi.org/10.5281/zenodo.18979476
 
 ```text
 s-biad531-embryo-tempoformer/
