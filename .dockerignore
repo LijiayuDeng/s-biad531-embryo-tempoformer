@@ -1,0 +1,24 @@
+# Ignore git files
+.git
+.gitignore
+
+# Ignore environment files
+environment.yml
+.env
+
+# Ignore python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore potentially large data folders if they exist locally
+data/
+datasets/
+*.tiff
+*.tif
+*.nii.gz
+*.h5
+
+# OS generated files
+.DS_Store
+Thumbs.db
