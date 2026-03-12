@@ -140,6 +140,7 @@ def main() -> None:
                     "m_origin": float(summary["m_origin"]),
                     "origin_resid_mean_h": float(summary["origin_resid_mean_h"]),
                     "origin_resid_sd_h": float(summary["origin_resid_sd_h"]),
+                    "origin_r2": float(summary["origin_r2"]),
                     "corr_r2": float(summary["corr_r2"]),
                 }
             )
@@ -166,6 +167,7 @@ def main() -> None:
                 "m_origin": fmt(row["m_origin"]),
                 "origin resid mean±sd (h)": f"{fmt(row['origin_resid_mean_h'])} ± {fmt(row['origin_resid_sd_h'])}",
                 "t0 median (h)": fmt(row["t0_final_median_h"]),
+                "through-origin line-fit R2": fmt(row["origin_r2"]),
                 "corr^2": fmt(row["corr_r2"]),
             }
         )
@@ -179,6 +181,7 @@ def main() -> None:
         "m_origin",
         "origin resid mean±sd (h)",
         "t0 median (h)",
+        "through-origin line-fit R2",
         "corr^2",
     ]
     out_md.write_text(markdown_table(pretty_rows, headers), encoding="utf-8")

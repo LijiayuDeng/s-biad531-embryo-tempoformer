@@ -21,18 +21,18 @@ def main() -> None:
     ap.add_argument("--amp", type=int, default=1)
     ap.add_argument("--use_ema", type=int, default=1)
     ap.add_argument("--batch_size", type=int, default=64)
-    ap.add_argument("--proc_28c5", required=True)
-    ap.add_argument("--proc_25c", required=True)
-    ap.add_argument("--split_28c5", required=True)
-    ap.add_argument("--split_25c", required=True)
+    ap.add_argument("--proc_28c5", default="")
+    ap.add_argument("--proc_25c", default="")
+    ap.add_argument("--split_28c5", default="")
+    ap.add_argument("--split_25c", default="")
     ap.add_argument("--proc_28c5_sbiad840", default="")
     ap.add_argument("--proc_25c_sbiad840", default="")
     ap.add_argument("--split_28c5_sbiad840", default="")
     ap.add_argument("--split_25c_sbiad840", default="")
-    ap.add_argument("--ckpt_cnn_single", required=True)
-    ap.add_argument("--ckpt_meanpool", required=True)
-    ap.add_argument("--ckpt_nocons", required=True)
-    ap.add_argument("--ckpt_full", required=True)
+    ap.add_argument("--ckpt_cnn_single", default="")
+    ap.add_argument("--ckpt_meanpool", default="")
+    ap.add_argument("--ckpt_nocons", default="")
+    ap.add_argument("--ckpt_full", default="")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -42,10 +42,11 @@ def main() -> None:
     outroot = Path(args.outroot) if args.outroot else Path("./runs") / f"paper_eval_{stamp}"
     outroot.mkdir(parents=True, exist_ok=True)
 
-    dataset_map = {
-        "ID28C5_TEST": (Path(args.proc_28c5), Path(args.split_28c5), "test"),
-        "EXT25C_TEST": (Path(args.proc_25c), Path(args.split_25c), "test"),
-    }
+    dataset_map: dict[str, tuple[Path, Path, str]] = {}
+    if args.proc_28c5 and args.split_28c5:
+        dataset_map["ID28C5_TEST"] = (Path(args.proc_28c5), Path(args.split_28c5), "test")
+    if args.proc_25c and args.split_25c:
+        dataset_map["EXT25C_TEST"] = (Path(args.proc_25c), Path(args.split_25c), "test")
     if args.proc_28c5_sbiad840 and args.split_28c5_sbiad840:
         dataset_map["SBIAD840_28C5_TEST"] = (
             Path(args.proc_28c5_sbiad840),
@@ -58,25 +59,35 @@ def main() -> None:
             Path(args.split_25c_sbiad840),
             "test",
         )
-    ckpt_map = {
-        "cnn_single": Path(args.ckpt_cnn_single),
-        "meanpool": Path(args.ckpt_meanpool),
-        "nocons": Path(args.ckpt_nocons),
-        "full": Path(args.ckpt_full),
-    }
+    ckpt_map: dict[str, Path] = {}
+    if args.ckpt_cnn_single:
+        ckpt_map["cnn_single"] = Path(args.ckpt_cnn_single)
+    if args.ckpt_meanpool:
+        ckpt_map["meanpool"] = Path(args.ckpt_meanpool)
+    if args.ckpt_nocons:
+        ckpt_map["nocons"] = Path(args.ckpt_nocons)
+    if args.ckpt_full:
+        ckpt_map["full"] = Path(args.ckpt_full)
 
     datasets = parse_csv_list(args.datasets)
     models = parse_csv_list(args.models)
 
-    print(f"[INFO] OUTROOT={outroot}")
     for ds in datasets:
         if ds not in dataset_map:
-            raise KeyError(f"Unknown dataset tag: {ds}")
+            raise SystemExit(
+                f"Dataset '{ds}' was requested but its proc/split paths were not provided."
+            )
+    for model in models:
+        if model not in ckpt_map:
+            raise SystemExit(
+                f"Model '{model}' was requested but its checkpoint path was not provided."
+            )
+
+    print(f"[INFO] OUTROOT={outroot}")
+    for ds in datasets:
         proc_dir, split_path, split_key = dataset_map[ds]
         ids = load_split_ids(split_path, split_key)
         for model in models:
-            if model not in ckpt_map:
-                raise KeyError(f"Unknown model tag: {model}")
             out_dir = outroot / ds / model / "json"
             out_dir.mkdir(parents=True, exist_ok=True)
             print(f"[RUN] infer {ds} {model}")

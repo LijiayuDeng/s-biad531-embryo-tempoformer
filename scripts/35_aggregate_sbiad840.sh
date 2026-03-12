@@ -3,6 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
 # Aggregate completed S-BIAD840 external-domain JSON outputs.
 #
 # Usage:
@@ -10,12 +12,10 @@ cd "$(dirname "$0")/.."
 #   bash scripts/35_aggregate_sbiad840.sh runs/sbiad840_eval_20260311_4models
 
 if [ -f ".env" ]; then
-  # shellcheck disable=SC1091
-  source .env
+  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
 fi
 
 OUTROOT="${1:-${OUTROOT:-runs/sbiad840_eval_20260311_4models}}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
 DT="${DT_H:-0.25}"
 T0="${T0_HPF:-4.5}"
 MODELS="${MODELS:-cnn_single,meanpool,nocons,full}"

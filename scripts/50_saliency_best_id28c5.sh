@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
 # ============================================================
 # Pick the "best" embryo on ID28C5_TEST (by minimal rmse_resid)
 # and run SmoothGrad saliency for 5 clips (start=0/42/84/126/168).
@@ -21,8 +23,7 @@ cd "$(dirname "$0")/.."
 # ============================================================
 
 if [ -f ".env" ]; then
-  # shellcheck disable=SC1091
-  source .env
+  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
 else
   echo "[ERR] .env not found. Run: cp .env.example .env and edit paths."
   exit 1
@@ -53,7 +54,6 @@ if [ ! -f "$EMBRYO_CSV" ]; then
   exit 1
 fi
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
 
 # pick best EID by (rmse_resid, max_abs_resid)
 EID="$("$PYTHON_BIN" analysis/select_best_embryo.py --embryo_csv "$EMBRYO_CSV")"

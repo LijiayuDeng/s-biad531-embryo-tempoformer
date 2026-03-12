@@ -33,12 +33,16 @@ def origin_fit_stats(x: np.ndarray, y: np.ndarray) -> dict[str, float]:
     denom = float(np.dot(x, x))
     m_origin = float(np.dot(x, y) / denom) if denom > 0 else float("nan")
     resid = y - m_origin * x
+    y_hat = m_origin * x
+    ss_res = float(np.sum(np.square(y - y_hat)))
+    ss_tot = float(np.sum(np.square(y - float(np.mean(y)))))
     corr = float(np.corrcoef(x, y)[0, 1]) if len(x) > 1 else float("nan")
     return {
         "m_origin": m_origin,
         "origin_resid_mean": float(np.mean(resid)),
         "origin_resid_sd": float(np.std(resid, ddof=0)),
         "origin_resid_rmse": float(np.sqrt(np.mean(np.square(resid)))),
+        "origin_r2": float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan"),
         "corr_r2": corr * corr,
     }
 
@@ -123,6 +127,7 @@ def main() -> None:
                     "origin_resid_mean_h": ofs["origin_resid_mean"],
                     "origin_resid_sd_h": ofs["origin_resid_sd"],
                     "origin_resid_rmse_h": ofs["origin_resid_rmse"],
+                    "origin_r2": ofs["origin_r2"],
                     "corr_r2": ofs["corr_r2"],
                 }
             )
@@ -150,6 +155,7 @@ def main() -> None:
                 "t0 median (h)": fmt(row["t0_final_median_h"]),
                 "m_origin": fmt(row["m_origin"]),
                 "origin resid mean±sd (h)": f"{fmt(row['origin_resid_mean_h'])} ± {fmt(row['origin_resid_sd_h'])}",
+                "origin R2": fmt(row["origin_r2"]),
                 "corr^2": fmt(row["corr_r2"]),
             }
         )
@@ -164,6 +170,7 @@ def main() -> None:
         "t0 median (h)",
         "m_origin",
         "origin resid mean±sd (h)",
+        "origin R2",
         "corr^2",
     ]
     out_md.write_text(rows_to_markdown(pretty_rows, headers))

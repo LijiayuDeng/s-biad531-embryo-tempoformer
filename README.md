@@ -165,8 +165,9 @@ bash scripts/reproduce_all.sh
 7. `scripts/12_cliplen_context_fit.sh <OUTROOT> <OUTROOT>/cliplen_sensitivity <OUTROOT>/cliplen_sensitivity/context_fit` — compact `0h/1h/3h/6h` context ladder and descriptive ETF-full fits
 8. `scripts/32_stage_error_bins.sh <OUTROOT> <OUTROOT>/stage_error/stage_error_by_bin.csv` — stage-stratified point-level error summary
 9. `scripts/33_anchor_sensitivity.sh <OUTROOT> <OUTROOT>/anchor_sensitivity` — T0 anchor sensitivity re-aggregation summary
-10. `scripts/40_make_figures.sh <OUTROOT>` — generates publication figures (PNG + PDF)
-11. (optional) `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>` if `RUN_SALIENCY=1`
+10. `scripts/44_stage_tempo_dependence.sh <OUTROOT> <OUTROOT>/stage_tempo` — direct stage-dependent tempo analysis (piecewise slopes + local interval derivatives)
+11. `scripts/40_make_figures.sh <OUTROOT>` — generates publication figures (PNG + PDF)
+12. (optional) `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>` if `RUN_SALIENCY=1`
 
 Output root directory (OUTROOT):
 - `runs/paper_eval_YYYYMMDD_HHMMSS/`
@@ -218,6 +219,10 @@ Under `runs/paper_eval_YYYYMMDD_HHMMSS/`:
 - `cliplen_sensitivity/context_fit/full_context_fit.csv` — descriptive ETF-full 1/3/6h linear fits (optional)
 - `stage_error/stage_error_by_bin.csv` — stage-stratified point-level error summary (optional)
 - `anchor_sensitivity/anchor_sensitivity_summary.csv` — T0 anchor sensitivity summary (optional)
+- `stage_tempo/piecewise_stage_slopes.csv` — Kimmel-period piecewise tempo slopes (optional)
+- `stage_tempo/local_slope_by_interval.csv` — local interval slopes from stage-averaged trajectories (optional)
+- `stage_tempo/stage_tempo_full_summary.md` — compact ETF-full stage-dependent summary table (optional)
+- `stage_tempo/full_local_slope_by_interval.svg` — ETF-full local-slope figure (optional)
 
 **Figures**
 - `figures_jobs/` — publication figures (PNG + PDF)
@@ -455,6 +460,59 @@ Interpretation note:
 
 ---
 
+## Optional: Direct Stage-Dependent Tempo Analysis
+
+This analysis directly tests whether the inferred tempo shift is uniform across
+development or concentrated in specific windows.
+
+Preferred shell entrypoint:
+```bash
+bash scripts/44_stage_tempo_dependence.sh \
+  runs/paper_eval_20260225_232506 \
+  runs/paper_eval_20260225_232506/stage_tempo
+```
+
+Common environment overrides:
+```bash
+DATASETS=ID28C5_TEST,EXT25C_TEST \
+MODELS=cnn_single,meanpool,nocons,full \
+N_BOOT=3000 \
+SEED=42 \
+bash scripts/44_stage_tempo_dependence.sh
+```
+
+Direct Python remains available:
+```bash
+python analysis/stage_tempo_dependence.py \
+  --outroot runs/paper_eval_20260225_232506 \
+  --datasets ID28C5_TEST,EXT25C_TEST \
+  --models cnn_single,meanpool,nocons,full \
+  --out_dir runs/paper_eval_20260225_232506/stage_tempo
+```
+
+Outputs:
+- `stage_tempo/piecewise_stage_slopes.csv`
+- `stage_tempo/local_slope_by_interval.csv`
+- `stage_tempo/stage_delta_contrasts.csv`
+- `stage_tempo/stage_tempo_full_summary.md`
+- `stage_tempo/full_local_slope_by_interval.svg`
+
+Interpretation:
+- `piecewise_stage_slopes.csv` is the primary inferential output for Comment 11: stagewise OLS slopes with embryo-bootstrap CIs.
+- `local_slope_by_interval.csv` is a descriptive companion view only.
+- The global anchored-fit summary remains the native ETF readout; stagewise slopes are used to test only modest stage dependence on top of that near-linear trend.
+
+Notes:
+- Stagewise piecewise slopes are fit by ordinary least squares within each
+  Kimmel broad period.
+- Uncertainty for the stagewise slopes is quantified by embryo-bootstrap
+  resampling over `eid`, so the resulting 95% CIs respect embryo-level rather
+  than window-level independence.
+- The local interval-slope view remains descriptive and is intended as a
+  consistency check rather than the primary inferential test.
+
+---
+
 ## Optional: SmoothGrad saliency
 
 SmoothGrad is **qualitative** and slower; it is not required for paper quantitative reproduction.
@@ -683,7 +741,7 @@ bash scripts/37_infer_sbiad840_cnn_dense.sh runs/sbiad840_eval_dense_cnn_single
 bash scripts/35_aggregate_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
 bash scripts/36_summarize_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
 bash scripts/38_compare_sbiad840_kimmelnet.sh \
-  runs/sbiad840_eval_20260311_4models \
+  runs/sbiad840_eval_zero_shot \
   runs/sbiad840_eval_dense_cnn_single
 ```
 
@@ -774,6 +832,25 @@ the first round, so the initial fine-tune splits are generated only from
 bash scripts/42_summarize_sbiad840_finetune.sh
 ```
 
+Required environment overrides (example paths only):
+
+```bash
+CNN_RUN_DIR=./runs/finetune_cnn_single_ft12_frame_tail1_20260311_211714
+CNN_EVAL28_OUTROOT=./runs/sbiad840_ft12_frame_tail1_eval
+CNN_EVAL25_OUTROOT=./runs/sbiad840_ft12_25c_eval
+FULL_RUN_DIR=./runs/finetune_full_ft12_temporal_last1_20260311_224924
+FULL_EVAL28_OUTROOT=./runs/sbiad840_ft12_full_temporal_last1_eval
+FULL_EVAL25_OUTROOT=./runs/sbiad840_ft12_25c_eval
+bash scripts/42_summarize_sbiad840_finetune.sh
+```
+
+Notes:
+
+- The dated run directories above are examples, not canonical required names.
+- `42` is a thin wrapper around `analysis/run_sbiad840_finetune_summary.py`; experiment definitions are passed explicitly rather than hardcoded in shell.
+- The held-out `28.5C` fine-tune comparison in the rebuttal package is based on the fine-tune split test subset (`28C5_sbiad840_ft12_v12_seed42.json`), whereas the `25C` evaluation remains on the full external test split.
+- Override output locations with `OUT_DIR`, `OUT_CSV`, and `OUT_MD` if needed.
+
 Default outputs:
 
 - `runs/sbiad840_finetune_compare/sbiad840_finetune_compare.csv`
@@ -788,15 +865,36 @@ bash scripts/43_eval_sbiad840_finetuned.sh
 Typical environment overrides:
 
 ```bash
-FT_CKPT=./runs/finetune_full_ft12_temporal_last1/best.pt
+FT_CKPT=./runs/finetune_full_ft12_temporal_last1_20260311_224924/best.pt
 MODEL=full
-TRAIN_TAG=ft12_temporal_last1
 OUTROOT=./runs/sbiad840_ft12_full_temporal_last1_eval
-RUN_25C=1
+DATASETS=SBIAD840_28C5_TEST,SBIAD840_25C_TEST
+PROC_28C5_SBIAD840=./data/sbiad840_aligned_4p5/processed_28C5_sbiad840
+PROC_25C_SBIAD840=./data/sbiad840_aligned_4p5/processed_25C_sbiad840
+SPLIT_28C5_SBIAD840=./data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft12_v12_seed42.json
+SPLIT_25C_SBIAD840=./data/sbiad840_aligned_4p5/splits/25C_sbiad840_test.json
+bash scripts/43_eval_sbiad840_finetuned.sh
 ```
 
-This helper reuses the standard Princeton inference + aggregation path and then
-produces held-out external summaries for the selected fine-tuned checkpoint.
+Notes:
+
+- `43` is a thin wrapper around `analysis/eval_sbiad840_finetuned.py`.
+- Dataset paths can be passed explicitly as above or resolved from `.env` by the Python helper.
+- Use the fine-tune split JSON for `SPLIT_28C5_SBIAD840` if you want the held-out `28.5C` numbers to match the rebuttal tables; use `28C5_sbiad840_test.json` only when evaluating on the full Princeton `28.5C` pool.
+- Default outputs are:
+  - `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`
+  - `<OUTROOT>/sbiad840_external_summary.csv`
+  - `<OUTROOT>/sbiad840_external_summary.md`
+- Native ETF metrics in these outputs are `m_anchor`, `rmse_resid`, and `max_abs_resid`; auxiliary comparison-only metrics are `m_origin`, through-origin residuals, and through-origin line-fit `R2`.
+
+Princeton script matrix:
+
+| Script | Purpose | Required inputs | Default outputs |
+|---|---|---|---|
+| `38_compare_sbiad840_kimmelnet.sh <BASE_OUTROOT> <DENSE_OUTROOT>` | compare ETF Princeton results against KimmelNet Table 1/2 using through-origin `y = mx` quantities | summarized zero-shot outroot; summarized dense `cnn_single` outroot | `<BASE_OUTROOT>/sbiad840_vs_kimmelnet.{csv,md}` |
+| `42_summarize_sbiad840_finetune.sh [OUT_DIR]` | summarize multiple Princeton fine-tune runs into one comparison table | `CNN_RUN_DIR`, `CNN_EVAL28_OUTROOT`, `CNN_EVAL25_OUTROOT`, `FULL_RUN_DIR`, `FULL_EVAL28_OUTROOT`, `FULL_EVAL25_OUTROOT` | `<OUT_DIR>/sbiad840_finetune_compare.{csv,md}` |
+| `43_eval_sbiad840_finetuned.sh [OUTROOT]` | evaluate one fine-tuned checkpoint on held-out Princeton datasets | `FT_CKPT`, `MODEL`; optional explicit Princeton proc/split paths | `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`, plus `<OUTROOT>/sbiad840_external_summary.{csv,md}` |
+| `44_stage_tempo_dependence.sh [OUTROOT] [OUT_DIR]` | stage-dependent tempo analysis with embryo-bootstrap stagewise slopes | aggregated ETF outroot; optional dataset/model/bootstrap overrides | `<OUT_DIR>/piecewise_stage_slopes.csv`, `local_slope_by_interval.csv`, `stage_delta_contrasts.csv`, `stage_tempo_full_summary.md`, `full_local_slope_by_interval.svg` |
 
 ---
 
@@ -1021,8 +1119,9 @@ bash scripts/reproduce_all.sh
 7. `scripts/12_cliplen_context_fit.sh <OUTROOT> <OUTROOT>/cliplen_sensitivity <OUTROOT>/cliplen_sensitivity/context_fit` — `0h/1h/3h/6h` context ladder 与 ETF-full 描述性拟合
 8. `scripts/32_stage_error_bins.sh <OUTROOT> <OUTROOT>/stage_error/stage_error_by_bin.csv` — 分期误差汇总
 9. `scripts/33_anchor_sensitivity.sh <OUTROOT> <OUTROOT>/anchor_sensitivity` — T0 锚点敏感性汇总
-10. `scripts/40_make_figures.sh <OUTROOT>` — 生成论文图（PNG + PDF）
-11. （可选）若 `RUN_SALIENCY=1`，运行 `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>`
+10. `scripts/44_stage_tempo_dependence.sh <OUTROOT> <OUTROOT>/stage_tempo` — 直接的阶段依赖 tempo 分析（分段斜率 + 局部导数）
+11. `scripts/40_make_figures.sh <OUTROOT>` — 生成论文图（PNG + PDF）
+12. （可选）若 `RUN_SALIENCY=1`，运行 `scripts/50_saliency_best_id28c5.sh <OUTROOT> <model>`
 
 输出根目录（OUTROOT）：
 - `runs/paper_eval_YYYYMMDD_HHMMSS/`
@@ -1074,6 +1173,10 @@ RUN_CONTINUOUS_POWER=0 RUN_CLIPLEN_SENSITIVITY=0 RUN_STAGE_ERROR_BINS=0 RUN_ANCH
 - `cliplen_sensitivity/context_fit/full_context_fit.csv` — ETF-full 在 `1/3/6h` 上的描述性直线拟合（可选）
 - `stage_error/stage_error_by_bin.csv` — 按 Kimmel 分期的点级误差汇总（可选）
 - `anchor_sensitivity/anchor_sensitivity_summary.csv` — T0 锚点敏感性汇总（可选）
+- `stage_tempo/piecewise_stage_slopes.csv` — Kimmel 分期下的分段 tempo 斜率（可选）
+- `stage_tempo/local_slope_by_interval.csv` — 基于平均轨迹的局部 interval slope（可选）
+- `stage_tempo/stage_tempo_full_summary.md` — ETF-full 的阶段依赖摘要表（可选）
+- `stage_tempo/full_local_slope_by_interval.svg` — ETF-full 的局部斜率图（可选）
 
 **论文图**
 - `figures_jobs/` — 论文图（PNG + PDF）
@@ -1095,6 +1198,50 @@ Thin-shell 说明：
   - `analysis/run_reproduction_pipeline.py`
 
 ---
+
+## 可选：直接的阶段依赖 Tempo 分析
+
+这个分析直接回答：温度导致的 tempo 变化是否在发育过程中近似均匀，还是集中在某些阶段窗口。
+
+推荐的 shell 入口：
+```bash
+bash scripts/44_stage_tempo_dependence.sh \
+  runs/paper_eval_20260225_232506 \
+  runs/paper_eval_20260225_232506/stage_tempo
+```
+
+常用环境变量：
+```bash
+DATASETS=ID28C5_TEST,EXT25C_TEST \
+MODELS=cnn_single,meanpool,nocons,full \
+N_BOOT=3000 \
+SEED=42 \
+bash scripts/44_stage_tempo_dependence.sh
+```
+
+也可以直接运行 Python：
+```bash
+python analysis/stage_tempo_dependence.py \
+  --outroot runs/paper_eval_20260225_232506 \
+  --datasets ID28C5_TEST,EXT25C_TEST \
+  --models cnn_single,meanpool,nocons,full \
+  --out_dir runs/paper_eval_20260225_232506/stage_tempo
+```
+
+输出：
+- `stage_tempo/piecewise_stage_slopes.csv`
+- `stage_tempo/local_slope_by_interval.csv`
+- `stage_tempo/stage_delta_contrasts.csv`
+- `stage_tempo/stage_tempo_full_summary.md`
+- `stage_tempo/full_local_slope_by_interval.svg`
+
+说明：
+- `piecewise_stage_slopes.csv` 按 Kimmel broad periods（blastula / gastrula / segmentation / pharyngula）分别拟合局部线性斜率。
+- 这些分段斜率的 95% CI 是按 embryo (`eid`) 做 bootstrap 得到的，因此遵循 embryo-level 而不是 window-level 独立性。
+- `stage_delta_contrasts.csv` 给出不同阶段 slowdown 强度之间的 bootstrap 对比。
+- `local_slope_by_interval.csv` 则按相邻 `2 h` nominal 区间计算局部导数风格的斜率。
+- 我们在回复信中主要使用 `ETF-full` 的分段斜率 + embryo-bootstrap CI 来回答 Comment 11，并用局部 interval slope 作为描述性一致性检查。
+- ETF 的主叙事仍然是“全局锚定近线性”，阶段分析只是检验是否存在温和的 stage dependence。
 
 ## 可选：SmoothGrad 热图
 
@@ -1323,7 +1470,7 @@ bash scripts/37_infer_sbiad840_cnn_dense.sh runs/sbiad840_eval_dense_cnn_single
 bash scripts/35_aggregate_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
 bash scripts/36_summarize_sbiad840.sh runs/sbiad840_eval_dense_cnn_single
 bash scripts/38_compare_sbiad840_kimmelnet.sh \
-  runs/sbiad840_eval_20260311_4models \
+  runs/sbiad840_eval_zero_shot \
   runs/sbiad840_eval_dense_cnn_single
 ```
 
@@ -1402,7 +1549,26 @@ LR=3e-4
 bash scripts/42_summarize_sbiad840_finetune.sh
 ```
 
-默认会读取常用的零样本与微调输出目录，并生成：
+需要显式提供实验目录，例如：
+
+```bash
+CNN_RUN_DIR=./runs/finetune_cnn_single_ft12_frame_tail1_20260311_211714 \
+CNN_EVAL28_OUTROOT=./runs/sbiad840_ft12_frame_tail1_eval \
+CNN_EVAL25_OUTROOT=./runs/sbiad840_ft12_25c_eval \
+FULL_RUN_DIR=./runs/finetune_full_ft12_temporal_last1_20260311_224924 \
+FULL_EVAL28_OUTROOT=./runs/sbiad840_ft12_full_temporal_last1_eval \
+FULL_EVAL25_OUTROOT=./runs/sbiad840_ft12_25c_eval \
+bash scripts/42_summarize_sbiad840_finetune.sh
+```
+
+说明：
+
+- 上面的 dated run 目录只是示例，不是脚本写死的默认值。
+- `42` 现在只是 `analysis/run_sbiad840_finetune_summary.py` 的薄包装；实验元组全部通过环境变量显式传入。
+- rebuttal 里的 held-out `28.5C` 微调对照表使用的是 fine-tune split 的 test 子集（`28C5_sbiad840_ft12_v12_seed42.json`），而 `25C` 仍使用完整外部测试集。
+- 结果路径可用 `OUT_DIR`、`OUT_CSV`、`OUT_MD` 覆盖。
+
+默认输出：
 
 - `runs/sbiad840_finetune_compare/sbiad840_finetune_compare.csv`
 - `runs/sbiad840_finetune_compare/sbiad840_finetune_compare.md`
@@ -1416,17 +1582,36 @@ bash scripts/43_eval_sbiad840_finetuned.sh
 常用环境变量：
 
 ```bash
-CKPT=./runs/finetune_full_ft12_temporal_last1_xxx/best.pt
+FT_CKPT=./runs/finetune_full_ft12_temporal_last1_20260311_224924/best.pt
 MODEL=full
+OUTROOT=./runs/sbiad840_ft_eval_full_temporal_last1
 DATASETS=SBIAD840_28C5_TEST,SBIAD840_25C_TEST
-OUT_ROOT=./runs/sbiad840_ft_eval_full_temporal_last1
+PROC_28C5_SBIAD840=./data/sbiad840_aligned_4p5/processed_28C5_sbiad840
+PROC_25C_SBIAD840=./data/sbiad840_aligned_4p5/processed_25C_sbiad840
+SPLIT_28C5_SBIAD840=./data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft12_v12_seed42.json
+SPLIT_25C_SBIAD840=./data/sbiad840_aligned_4p5/splits/25C_sbiad840_test.json
+bash scripts/43_eval_sbiad840_finetuned.sh
 ```
 
-该脚本会：
+说明：
 
-- 对指定 Princeton 数据集重新做 inference
-- 自动聚合为 `points.csv / embryo.csv / summary.json`
-- 同时输出一份 `sbiad840_external_summary.csv`
+- `43` 现在只是 `analysis/eval_sbiad840_finetuned.py` 的薄包装，shell 不再自己串联 inference / aggregation / summarize。
+- Princeton 数据路径既可以像上面这样显式给出，也可以由 Python 端从 `.env` 读取。
+- 如果你要复现 rebuttal 里 held-out `28.5C` 的微调结果，`SPLIT_28C5_SBIAD840` 应指向 fine-tune split JSON；若改回 `28C5_sbiad840_test.json`，则是在完整 Princeton `28.5C` 外部池上评估。
+- 默认输出：
+  - `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`
+  - `<OUTROOT>/sbiad840_external_summary.csv`
+  - `<OUTROOT>/sbiad840_external_summary.md`
+- 这些输出里，ETF 的原生指标是 `m_anchor`、`rmse_resid`、`max_abs_resid`；用于和 KimmelNet 对齐的辅助指标是 `m_origin`、过原点残差和 through-origin line-fit `R2`。
+
+Princeton 脚本真值表：
+
+| 脚本 | 作用 | 必需输入 | 默认输出 |
+|---|---|---|---|
+| `38_compare_sbiad840_kimmelnet.sh <BASE_OUTROOT> <DENSE_OUTROOT>` | 用过原点 `y = mx` 口径把 ETF Princeton 结果和 KimmelNet Table 1/2 对齐比较 | 已汇总的 zero-shot outroot；已汇总的 dense `cnn_single` outroot | `<BASE_OUTROOT>/sbiad840_vs_kimmelnet.{csv,md}` |
+| `42_summarize_sbiad840_finetune.sh [OUT_DIR]` | 把多个 Princeton 微调实验汇总成一张对照表 | `CNN_RUN_DIR`、`CNN_EVAL28_OUTROOT`、`CNN_EVAL25_OUTROOT`、`FULL_RUN_DIR`、`FULL_EVAL28_OUTROOT`、`FULL_EVAL25_OUTROOT` | `<OUT_DIR>/sbiad840_finetune_compare.{csv,md}` |
+| `43_eval_sbiad840_finetuned.sh [OUTROOT]` | 对单个微调 checkpoint 做 Princeton held-out 外部评估 | `FT_CKPT`、`MODEL`；Princeton proc/split 路径可显式给出，也可从 `.env` 解析 | `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`，以及 `<OUTROOT>/sbiad840_external_summary.{csv,md}` |
+| `44_stage_tempo_dependence.sh [OUTROOT] [OUT_DIR]` | 做阶段依赖 tempo 分析，并输出 embryo-bootstrap 分段斜率 | 已聚合的 ETF outroot；可选 dataset/model/bootstrap 覆盖 | `<OUT_DIR>/piecewise_stage_slopes.csv`、`local_slope_by_interval.csv`、`stage_delta_contrasts.csv`、`stage_tempo_full_summary.md`、`full_local_slope_by_interval.svg` |
 
 建议顺序：
 

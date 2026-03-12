@@ -3,6 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
 # Run a fairer KimmelNet-style dense single-frame external evaluation using ETF cnn_single.
 #
 # Usage:
@@ -10,12 +12,10 @@ cd "$(dirname "$0")/.."
 #   bash scripts/37_infer_sbiad840_cnn_dense.sh runs/sbiad840_eval_dense_cnn_single
 
 if [ -f ".env" ]; then
-  # shellcheck disable=SC1091
-  source .env
+  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
 fi
 
 OUTROOT="${1:-${OUTROOT:-runs/sbiad840_eval_dense_cnn_single}}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASETS="${DATASETS:-SBIAD840_28C5_TEST,SBIAD840_25C_TEST}"
 DEVICE="${DEVICE:-auto}"
 AMP="${AMP:-1}"

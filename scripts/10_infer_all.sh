@@ -2,6 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
 # Thin orchestration wrapper for multi-dataset / multi-model inference.
 #
 # Usage:
@@ -15,14 +17,12 @@ cd "$(dirname "$0")/.."
 #   OUTROOT=./runs/paper_eval_manual
 
 if [ -f ".env" ]; then
-  # shellcheck disable=SC1091
-  source .env
+  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
 else
   echo "[ERR] .env not found. Run: cp .env.example .env and edit paths."
   exit 1
 fi
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
 OUTROOT="${1:-${OUTROOT:-}}"
 
 "$PYTHON_BIN" analysis/run_infer_matrix.py \

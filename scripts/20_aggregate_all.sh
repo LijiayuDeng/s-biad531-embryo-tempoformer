@@ -5,6 +5,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
 OUTROOT=""
 FORCE=0
 for arg in "$@"; do
@@ -17,13 +19,11 @@ for arg in "$@"; do
 done
 
 if [ -f ".env" ]; then
-  # shellcheck disable=SC1091
-  source .env
+  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
 fi
 
 DT="${DT_H:-0.25}"
 T0="${T0_HPF:-4.5}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
 "$PYTHON_BIN" analysis/aggregate_matrix.py \
   --outroot "$OUTROOT" \
   --dt "$DT" \

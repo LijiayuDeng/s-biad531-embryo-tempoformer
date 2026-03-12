@@ -41,14 +41,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
 if [ -f ".env" ]; then
-  # shellcheck disable=SC1091
-  source .env
+  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
 fi
 
 stamp="$(date +%Y%m%d_%H%M%S)"
 OUTROOT="${1:-${RUNS_DIR:-./runs}/cliplen_sensitivity_${stamp}}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
 
 "$PYTHON_BIN" analysis/run_cliplen_sensitivity.py \
   --outroot "$OUTROOT" \

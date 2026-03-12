@@ -44,6 +44,7 @@ import torch.nn.functional as F
 # Make repo root importable so we can `import src...`
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "src"))
 
 
 def load_model_from_ckpt(ckpt_path: str, use_ema: bool, device: torch.device):

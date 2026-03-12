@@ -69,7 +69,8 @@ def main() -> None:
                 "t0 median (h)": "NA",
                 "m_origin": fmt(lit["slope"]),
                 "origin resid mean±sd (h)": f"{fmt(lit['prediction_error_mean_h'])} ± {fmt(lit['prediction_error_sd_h'])}",
-                "R2 / corr^2": fmt(lit["r2_line_fit"]),
+                "through-origin line-fit R2": fmt(lit["r2_line_fit"]),
+                "corr^2": "-",
             }
         )
 
@@ -87,7 +88,8 @@ def main() -> None:
                     "t0 median (h)": fmt(row["t0_final_median_h"]),
                     "m_origin": fmt(row["m_origin"]),
                     "origin resid mean±sd (h)": f"{fmt(row['origin_resid_mean_h'])} ± {fmt(row['origin_resid_sd_h'])}",
-                    "R2 / corr^2": f"{fmt(row['r2_points'])} / {fmt(row['corr_r2'])}",
+                    "through-origin line-fit R2": fmt(row["origin_r2"]),
+                    "corr^2": fmt(row["corr_r2"]),
                 }
             )
 
@@ -105,7 +107,8 @@ def main() -> None:
                     "t0 median (h)": fmt(row["t0_final_median_h"]),
                     "m_origin": fmt(row["m_origin"]),
                     "origin resid mean±sd (h)": f"{fmt(row['origin_resid_mean_h'])} ± {fmt(row['origin_resid_sd_h'])}",
-                    "R2 / corr^2": f"{fmt(row['r2_points'])} / {fmt(row['corr_r2'])}",
+                    "through-origin line-fit R2": fmt(row["origin_r2"]),
+                    "corr^2": fmt(row["corr_r2"]),
                 }
             )
 
@@ -119,7 +122,8 @@ def main() -> None:
         "t0 median (h)",
         "m_origin",
         "origin resid mean±sd (h)",
-        "R2 / corr^2",
+        "through-origin line-fit R2",
+        "corr^2",
     ]
 
     out_csv = Path(args.out_csv)
