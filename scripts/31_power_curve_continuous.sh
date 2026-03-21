@@ -38,7 +38,9 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/_shell_env.sh"
+bootstrap_python_bin
 
 OUTROOT="${1:-$ROOT/runs/paper_eval_20260225_232506}"
 OUT_DIR="${2:-$OUTROOT/continuous_power}"

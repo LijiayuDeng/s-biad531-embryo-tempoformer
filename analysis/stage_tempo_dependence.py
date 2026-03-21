@@ -296,72 +296,90 @@ def main() -> None:
         ["model", "contrast", "estimate", "ci_lo", "ci_hi", "n_boot_eff"],
     )
 
-    # Compact markdown table for the main full-model stage-dependent comparison.
-    pretty_rows: list[dict[str, str]] = []
-    stage_lookup = {
-        (row["dataset"], row["stage_name"]): row
-        for row in piecewise_rows
-        if row["model"] == "full"
-    }
-    for stage_name, lo, hi in KIMMEL_PERIODS:
-        r28 = stage_lookup[("ID28C5_TEST", stage_name)]
-        r25 = stage_lookup[("EXT25C_TEST", stage_name)]
-        rd = stage_lookup[("delta_25C_minus_28C5", stage_name)]
-        pretty_rows.append(
-            {
-                "Kimmel period": stage_name.capitalize(),
-                "Canonical window (hpf)": f"{lo:.2f}-{hi:.2f}",
-                "28.5C piecewise slope [95% CI]": (
-                    f"{fmt(float(r28['piecewise_slope']))} "
-                    f"[{fmt(float(r28['piecewise_slope_ci_lo']))}, {fmt(float(r28['piecewise_slope_ci_hi']))}]"
-                ),
-                "25C piecewise slope [95% CI]": (
-                    f"{fmt(float(r25['piecewise_slope']))} "
-                    f"[{fmt(float(r25['piecewise_slope_ci_lo']))}, {fmt(float(r25['piecewise_slope_ci_hi']))}]"
-                ),
-                "delta slope (25C-28.5C) [95% CI]": (
-                    f"{fmt(float(rd['piecewise_slope']))} "
-                    f"[{fmt(float(rd['piecewise_slope_ci_lo']))}, {fmt(float(rd['piecewise_slope_ci_hi']))}]"
-                ),
-            }
-        )
-    md_path = out_dir / "stage_tempo_full_summary.md"
-    headers = [
-        "Kimmel period",
-        "Canonical window (hpf)",
-        "28.5C piecewise slope [95% CI]",
-        "25C piecewise slope [95% CI]",
-        "delta slope (25C-28.5C) [95% CI]",
-    ]
-    md_path.write_text(rows_to_markdown(pretty_rows, headers), encoding="utf-8")
+    md_path: Path | None = None
+    fig_path: Path | None = None
+    can_make_full_summary = (
+        "full" in models and "ID28C5_TEST" in datasets and "EXT25C_TEST" in datasets
+    )
+    if can_make_full_summary:
+        pretty_rows: list[dict[str, str]] = []
+        stage_lookup = {
+            (row["dataset"], row["stage_name"]): row
+            for row in piecewise_rows
+            if row["model"] == "full"
+        }
+        required_keys = [
+            ("ID28C5_TEST", stage_name) for stage_name, _, _ in KIMMEL_PERIODS
+        ] + [
+            ("EXT25C_TEST", stage_name) for stage_name, _, _ in KIMMEL_PERIODS
+        ] + [
+            ("delta_25C_minus_28C5", stage_name) for stage_name, _, _ in KIMMEL_PERIODS
+        ]
+        if all(key in stage_lookup for key in required_keys):
+            for stage_name, lo, hi in KIMMEL_PERIODS:
+                r28 = stage_lookup[("ID28C5_TEST", stage_name)]
+                r25 = stage_lookup[("EXT25C_TEST", stage_name)]
+                rd = stage_lookup[("delta_25C_minus_28C5", stage_name)]
+                pretty_rows.append(
+                    {
+                        "Kimmel period": stage_name.capitalize(),
+                        "Canonical window (hpf)": f"{lo:.2f}-{hi:.2f}",
+                        "28.5C piecewise slope [95% CI]": (
+                            f"{fmt(float(r28['piecewise_slope']))} "
+                            f"[{fmt(float(r28['piecewise_slope_ci_lo']))}, {fmt(float(r28['piecewise_slope_ci_hi']))}]"
+                        ),
+                        "25C piecewise slope [95% CI]": (
+                            f"{fmt(float(r25['piecewise_slope']))} "
+                            f"[{fmt(float(r25['piecewise_slope_ci_lo']))}, {fmt(float(r25['piecewise_slope_ci_hi']))}]"
+                        ),
+                        "delta slope (25C-28.5C) [95% CI]": (
+                            f"{fmt(float(rd['piecewise_slope']))} "
+                            f"[{fmt(float(rd['piecewise_slope_ci_lo']))}, {fmt(float(rd['piecewise_slope_ci_hi']))}]"
+                        ),
+                    }
+                )
+            md_path = out_dir / "stage_tempo_full_summary.md"
+            headers = [
+                "Kimmel period",
+                "Canonical window (hpf)",
+                "28.5C piecewise slope [95% CI]",
+                "25C piecewise slope [95% CI]",
+                "delta slope (25C-28.5C) [95% CI]",
+            ]
+            md_path.write_text(rows_to_markdown(pretty_rows, headers), encoding="utf-8")
 
-    # ETF-full local-slope figure.
-    import matplotlib.pyplot as plt
+            import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(8.0, 4.2))
-    for ds, color, label in [
-        ("ID28C5_TEST", "#1f4e79", "28.5C"),
-        ("EXT25C_TEST", "#b24a2a", "25C"),
-    ]:
-        xs = [float(r["x_mid_hpf"]) for r in local_rows if r["model"] == "full" and r["dataset"] == ds]
-        ys = [float(r["local_slope"]) for r in local_rows if r["model"] == "full" and r["dataset"] == ds]
-        ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.8, color=color, label=label)
-    ax.axhline(1.0, color="#666666", linestyle="--", linewidth=1.0)
-    ax.set_xlabel("Nominal interval midpoint (hpf)")
-    ax.set_ylabel("Local slope d(y_pred)/d(x_true)")
-    ax.set_title("ETF-full local tempo slope by developmental window")
-    ax.legend(frameon=False)
-    ax.grid(True, alpha=0.25, linewidth=0.6)
-    fig.tight_layout()
-    fig_path = out_dir / "full_local_slope_by_interval.svg"
-    fig.savefig(fig_path)
-    plt.close(fig)
+            fig, ax = plt.subplots(figsize=(8.0, 4.2))
+            for ds, color, label in [
+                ("ID28C5_TEST", "#1f4e79", "28.5C"),
+                ("EXT25C_TEST", "#b24a2a", "25C"),
+            ]:
+                xs = [float(r["x_mid_hpf"]) for r in local_rows if r["model"] == "full" and r["dataset"] == ds]
+                ys = [float(r["local_slope"]) for r in local_rows if r["model"] == "full" and r["dataset"] == ds]
+                ax.plot(xs, ys, marker="o", markersize=3, linewidth=1.8, color=color, label=label)
+            ax.axhline(1.0, color="#666666", linestyle="--", linewidth=1.0)
+            ax.set_xlabel("Nominal interval midpoint (hpf)")
+            ax.set_ylabel("Local slope d(y_pred)/d(x_true)")
+            ax.set_title("ETF-full local tempo slope by developmental window")
+            ax.legend(frameon=False)
+            ax.grid(True, alpha=0.25, linewidth=0.6)
+            fig.tight_layout()
+            fig_path = out_dir / "full_local_slope_by_interval.svg"
+            fig.savefig(fig_path)
+            plt.close(fig)
+        else:
+            print("[INFO] skip full-model markdown/figure because required rows are unavailable")
+    else:
+        print("[INFO] skip full-model markdown/figure because requested models/datasets do not include the full 28.5C vs 25C comparison")
 
     print(f"WROTE: {piecewise_csv}")
     print(f"WROTE: {local_csv}")
     print(f"WROTE: {contrast_csv}")
-    print(f"WROTE: {md_path}")
-    print(f"WROTE: {fig_path}")
+    if md_path is not None:
+        print(f"WROTE: {md_path}")
+    if fig_path is not None:
+        print(f"WROTE: {fig_path}")
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--device", default="")
     ap.add_argument("--amp", type=int, default=-1)
     ap.add_argument("--use_ema", type=int, default=-1)
+    ap.add_argument("--force_infer", type=int, default=1, choices=[0, 1])
     ap.add_argument("--batch_size", type=int, default=0)
     ap.add_argument("--clip_len", type=int, default=0)
     ap.add_argument("--img_size", type=int, default=0)
@@ -52,17 +53,10 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     dotenv_defaults = load_dotenv_defaults(repo_root)
 
-    model_ckpt_env = {
-        "cnn_single": "CKPT_CNN_SINGLE",
-        "meanpool": "CKPT_MEANPOOL",
-        "nocons": "CKPT_NOCONS",
-        "full": "CKPT_FULL",
-    }
-    default_ckpt = get_setting(model_ckpt_env[args.model], dotenv_defaults)
-    ft_ckpt = args.ft_ckpt or default_ckpt
+    ft_ckpt = args.ft_ckpt or get_setting("FT_CKPT", dotenv_defaults)
     if not ft_ckpt:
         raise SystemExit(
-            f"Missing fine-tuned checkpoint: pass --ft_ckpt or set {model_ckpt_env[args.model]} in environment/.env"
+            "Missing fine-tuned checkpoint: pass --ft_ckpt or set FT_CKPT in environment/.env"
         )
 
     proc_28 = args.proc_28c5_sbiad840 or get_setting("PROC_28C5_SBIAD840", dotenv_defaults)
@@ -116,6 +110,8 @@ def main() -> None:
         "analysis/run_infer_matrix.py",
         "--outroot",
         outroot,
+        "--force",
+        str(args.force_infer),
         "--datasets",
         args.datasets,
         "--models",

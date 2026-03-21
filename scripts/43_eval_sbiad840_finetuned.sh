@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
+load_repo_env_if_present ".env"
 OUTROOT="${1:-${OUTROOT:-./runs/sbiad840_finetuned_eval}}"
 DATASETS="${DATASETS:-SBIAD840_28C5_TEST,SBIAD840_25C_TEST}"
 DEVICE="${DEVICE:-cuda}"
@@ -41,6 +43,7 @@ cmd=(
   --device "$DEVICE"
   --amp "$AMP"
   --use_ema "$USE_EMA"
+  --force_infer "${FORCE_INFER:-1}"
   --batch_size "$BATCH_SIZE"
   --clip_len "$CLIP_LEN"
   --img_size "$IMG_SIZE"

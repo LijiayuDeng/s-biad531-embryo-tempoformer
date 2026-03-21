@@ -114,6 +114,14 @@ def stage_freeze_args(stage: str) -> list[str]:
     return mapping[stage]
 
 
+def validate_stage_for_model(stage: str, temporal_mode: str) -> None:
+    temporal_only_stages = {"temporal_last1", "temporal_last2", "temporal_head"}
+    if stage in temporal_only_stages and temporal_mode != "transformer":
+        raise SystemExit(
+            f"Stage '{stage}' requires temporal_mode=transformer, got temporal_mode={temporal_mode!r}"
+        )
+
+
 def pick_int(cli_value: int, ck_cfg: dict[str, Any], key: str) -> int:
     return int(cli_value) if cli_value > 0 else int(ck_cfg[key])
 
@@ -136,6 +144,7 @@ def main() -> None:
     mem_profile = args.mem_profile or str(ck_cfg.get("mem_profile", "balanced"))
     temporal_mode = str(ck_cfg.get("temporal_mode", "transformer"))
     lambda_diff = float(ck_cfg.get("lambda_diff", 1.0))
+    validate_stage_for_model(args.stage, temporal_mode)
 
     cmd = [
         sys.executable,

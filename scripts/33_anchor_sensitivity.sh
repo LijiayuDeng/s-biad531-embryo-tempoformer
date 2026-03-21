@@ -23,7 +23,9 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/_shell_env.sh"
+bootstrap_python_bin
 
 OUTROOT="${1:-$(ls -dt "$ROOT"/runs/paper_eval_* 2>/dev/null | head -n 1)}"
 OUTDIR="${2:-$OUTROOT/anchor_sensitivity}"

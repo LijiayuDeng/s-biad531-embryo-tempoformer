@@ -3,7 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
 
 # Summarize completed S-BIAD840 external-domain evaluation into CSV + Markdown tables.
 #
@@ -12,7 +13,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 #   bash scripts/36_summarize_sbiad840.sh runs/sbiad840_eval_20260311_4models
 
 if [ -f ".env" ]; then
-  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
+  load_repo_env_if_present ".env"
 fi
 
 OUTROOT="${1:-${OUTROOT:-runs/sbiad840_eval_20260311_4models}}"

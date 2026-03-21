@@ -2,7 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
+load_repo_env_if_present ".env"
 MODEL="${MODEL:-cnn_single}"
 STAGE="${STAGE:-head_only}"
 SPLIT_JSON="${SPLIT_JSON:-./data/sbiad840_aligned_4p5/splits/finetune/28C5_sbiad840_ft12_v12_seed42.json}"

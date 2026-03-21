@@ -23,7 +23,9 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source "$ROOT/scripts/_shell_env.sh"
+bootstrap_python_bin
 
 MAIN_OUTROOT="${1:-$ROOT/runs/paper_eval_20260225_232506}"
 CLIPLEN_OUTROOT="${2:-$ROOT/runs/cliplen_sensitivity_20260311_030252}"
@@ -39,4 +41,3 @@ echo "[INFO] OUT_DIR        = $OUT_DIR"
   --main_outroot "$MAIN_OUTROOT" \
   --cliplen_csv "$CLIPLEN_CSV" \
   --out_dir "$OUT_DIR"
-

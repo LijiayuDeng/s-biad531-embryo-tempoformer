@@ -18,7 +18,9 @@ cd "$(dirname "$0")/.."
 
 BASE_OUTROOT="${1:-${BASE_OUTROOT:-}}"
 DENSE_OUTROOT="${2:-${DENSE_OUTROOT:-}}"
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
+bootstrap_python_bin
 
 if [[ -z "$BASE_OUTROOT" || -z "$DENSE_OUTROOT" ]]; then
   echo "[ERR] Provide BASE_OUTROOT and DENSE_OUTROOT as positional args or env vars"

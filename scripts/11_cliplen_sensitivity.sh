@@ -41,10 +41,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
 
 if [ -f ".env" ]; then
-  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
+  load_repo_env_if_present ".env"
 fi
 
 stamp="$(date +%Y%m%d_%H%M%S)"
@@ -66,11 +67,11 @@ OUTROOT="${1:-${RUNS_DIR:-./runs}/cliplen_sensitivity_${stamp}}"
   --batch_size "${BATCH_SIZE:-64}" \
   --max_eids "${MAX_EIDS:-0}" \
   --force "${FORCE:-0}" \
-  --proc_28c5 "$PROC_28C5" \
-  --proc_25c "$PROC_25C" \
-  --split_28c5 "$SPLIT_28C5" \
-  --split_25c "$SPLIT_25C" \
-  --ckpt_cnn_single "$CKPT_CNN_SINGLE" \
-  --ckpt_meanpool "$CKPT_MEANPOOL" \
-  --ckpt_nocons "$CKPT_NOCONS" \
-  --ckpt_full "$CKPT_FULL"
+  --proc_28c5 "${PROC_28C5:-}" \
+  --proc_25c "${PROC_25C:-}" \
+  --split_28c5 "${SPLIT_28C5:-}" \
+  --split_25c "${SPLIT_25C:-}" \
+  --ckpt_cnn_single "${CKPT_CNN_SINGLE:-}" \
+  --ckpt_meanpool "${CKPT_MEANPOOL:-}" \
+  --ckpt_nocons "${CKPT_NOCONS:-}" \
+  --ckpt_full "${CKPT_FULL:-}"

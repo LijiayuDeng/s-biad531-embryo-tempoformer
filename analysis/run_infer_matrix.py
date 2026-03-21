@@ -21,6 +21,7 @@ def main() -> None:
     ap.add_argument("--amp", type=int, default=1)
     ap.add_argument("--use_ema", type=int, default=1)
     ap.add_argument("--batch_size", type=int, default=64)
+    ap.add_argument("--force", type=int, default=0)
     ap.add_argument("--proc_28c5", default="")
     ap.add_argument("--proc_25c", default="")
     ap.add_argument("--split_28c5", default="")
@@ -97,7 +98,7 @@ def main() -> None:
                     print(f"[WARN] missing {input_path}")
                     continue
                 out_json = out_dir / f"{eid}.json"
-                if out_json.exists():
+                if not args.force and out_json.exists():
                     continue
                 infer_one(
                     cli_script=cli_script,

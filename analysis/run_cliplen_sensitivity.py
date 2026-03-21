@@ -107,14 +107,14 @@ def main() -> None:
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--max_eids", type=int, default=0)
     ap.add_argument("--force", type=int, default=0)
-    ap.add_argument("--proc_28c5", required=True)
-    ap.add_argument("--proc_25c", required=True)
-    ap.add_argument("--split_28c5", required=True)
-    ap.add_argument("--split_25c", required=True)
-    ap.add_argument("--ckpt_cnn_single", required=True)
-    ap.add_argument("--ckpt_meanpool", required=True)
-    ap.add_argument("--ckpt_nocons", required=True)
-    ap.add_argument("--ckpt_full", required=True)
+    ap.add_argument("--proc_28c5", default="")
+    ap.add_argument("--proc_25c", default="")
+    ap.add_argument("--split_28c5", default="")
+    ap.add_argument("--split_25c", default="")
+    ap.add_argument("--ckpt_cnn_single", default="")
+    ap.add_argument("--ckpt_meanpool", default="")
+    ap.add_argument("--ckpt_nocons", default="")
+    ap.add_argument("--ckpt_full", default="")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parents[1]
@@ -124,16 +124,20 @@ def main() -> None:
     outroot = Path(args.outroot) if args.outroot else Path("./runs") / f"cliplen_sensitivity_{time.strftime('%Y%m%d_%H%M%S')}"
     outroot.mkdir(parents=True, exist_ok=True)
 
-    dataset_map = {
-        "ID28C5_TEST": (Path(args.proc_28c5), Path(args.split_28c5), "test"),
-        "EXT25C_TEST": (Path(args.proc_25c), Path(args.split_25c), "test"),
-    }
-    ckpt_map = {
-        "cnn_single": Path(args.ckpt_cnn_single),
-        "meanpool": Path(args.ckpt_meanpool),
-        "nocons": Path(args.ckpt_nocons),
-        "full": Path(args.ckpt_full),
-    }
+    dataset_map: dict[str, tuple[Path, Path, str]] = {}
+    if args.proc_28c5 and args.split_28c5:
+        dataset_map["ID28C5_TEST"] = (Path(args.proc_28c5), Path(args.split_28c5), "test")
+    if args.proc_25c and args.split_25c:
+        dataset_map["EXT25C_TEST"] = (Path(args.proc_25c), Path(args.split_25c), "test")
+    ckpt_map: dict[str, Path] = {}
+    if args.ckpt_cnn_single:
+        ckpt_map["cnn_single"] = Path(args.ckpt_cnn_single)
+    if args.ckpt_meanpool:
+        ckpt_map["meanpool"] = Path(args.ckpt_meanpool)
+    if args.ckpt_nocons:
+        ckpt_map["nocons"] = Path(args.ckpt_nocons)
+    if args.ckpt_full:
+        ckpt_map["full"] = Path(args.ckpt_full)
 
     clip_lens = [int(x) for x in parse_csv_list(args.clip_lens)]
     datasets = parse_csv_list(args.datasets)
@@ -142,6 +146,13 @@ def main() -> None:
     print(f"[INFO] OUTROOT={outroot}")
     print(f"[INFO] clip_lens={args.clip_lens} models={args.models} datasets={args.datasets}")
     print(f"[INFO] stride={args.stride} dt_h={args.dt_h} t0_hpf={args.t0_hpf} force={args.force} max_eids={args.max_eids}")
+
+    for ds in datasets:
+        if ds not in dataset_map:
+            raise KeyError(f"Dataset '{ds}' was requested but its proc/split paths were not provided.")
+    for model in models:
+        if model not in ckpt_map:
+            raise KeyError(f"Model '{model}' was requested but its checkpoint path was not provided.")
 
     for L in clip_lens:
         tagL = f"L{L:02d}"
@@ -158,11 +169,13 @@ def main() -> None:
                 json_dir.mkdir(parents=True, exist_ok=True)
                 out_dir.mkdir(parents=True, exist_ok=True)
                 print(f"[RUN] clip_len={L} dataset={ds} model={model}")
+                expected_json = 0
                 for eid in ids:
                     input_path = proc_dir / f"{eid}.npy"
                     if not input_path.exists():
                         print(f"[WARN] missing {input_path}")
                         continue
+                    expected_json += 1
                     out_json = json_dir / f"{eid}.json"
                     if not args.force and out_json.exists():
                         continue
@@ -181,11 +194,18 @@ def main() -> None:
                         batch_size=args.batch_size,
                     )
 
-                if not args.force and (out_dir / "summary.json").exists():
-                    continue
-                if count_json(json_dir) == 0:
+                njson = count_json(json_dir)
+                if njson == 0:
                     print(f"[WARN] no json files in {json_dir}; skip aggregate")
                     continue
+                summary_path = out_dir / "summary.json"
+                if not args.force and summary_path.exists() and njson == expected_json:
+                    continue
+                if not args.force and summary_path.exists() and njson != expected_json:
+                    print(
+                        f"[INFO] re-aggregate {out_dir} because json count changed "
+                        f"({njson}/{expected_json})"
+                    )
                 aggregate_one(aggregate_cli, json_dir, out_dir, args.dt_h, args.t0_hpf)
 
     rows = collect_summary_rows(outroot)

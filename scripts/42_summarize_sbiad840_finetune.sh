@@ -4,7 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
+bootstrap_python_bin
 OUT_DIR="${1:-./runs/sbiad840_finetune_compare}"
 OUT_CSV="${OUT_CSV:-$OUT_DIR/sbiad840_finetune_compare.csv}"
 OUT_MD="${OUT_MD:-$OUT_DIR/sbiad840_finetune_compare.md}"

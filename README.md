@@ -171,6 +171,11 @@ SPLIT_25C_SBIAD840=./data/sbiad840_aligned_4p5/splits/25C_sbiad840_test.json
 # IMPORTANT: keep RUNS_DIR=./runs because scripts/reproduce_all.sh assumes ./runs
 RUNS_DIR=./runs
 
+# Optional interpreter override for shell entrypoints.
+# If PYTHON_BIN is unset in the current shell, scripts/* bootstrap it from .env
+# before loading the remaining environment variables.
+PYTHON_BIN=python3
+
 # Time-axis constants used by aggregation scripts
 DT_H=0.25
 T0_HPF=4.5
@@ -282,6 +287,7 @@ Models (`<model>`): `cnn_single`, `meanpool`, `nocons`, `full`.
 
 Thin-shell note:
 - shell entrypoints under `scripts/` are orchestration wrappers only
+- if `PYTHON_BIN` is unset in the current shell, these wrappers bootstrap it from `.env` before loading the remaining variables
 - dataset/model enumeration, per-embryo scheduling, env checking, aggregation, CI/power matrix traversal, and top-level pipeline branching now live in Python (`analysis/check_env.py`, `analysis/run_infer_matrix.py`, `analysis/aggregate_matrix.py`, `analysis/run_ci_power_matrix.py`, `analysis/run_cliplen_sensitivity.py`, `analysis/select_best_embryo.py`, `analysis/run_reproduction_pipeline.py`)
 
 Common overrides for `scripts/10_infer_all.sh`:
@@ -289,8 +295,12 @@ Common overrides for `scripts/10_infer_all.sh`:
 OUTROOT=./runs/paper_eval_manual \
 DATASETS=ID28C5_TEST \
 MODELS=full \
+FORCE=1 \
 bash scripts/10_infer_all.sh
 ```
+
+Notes:
+- `FORCE=1` re-runs the requested per-embryo inference JSONs in-place. Leave it at `0` only if you intentionally want to reuse existing JSON under the same `OUTROOT`.
 
 ---
 
@@ -384,8 +394,12 @@ Common overrides:
 DATASETS=ID28C5_TEST,EXT25C_TEST \
 MODELS=full \
 CLIP_LENS=4,12,24 \
+FORCE=1 \
 bash scripts/11_cliplen_sensitivity.sh
 ```
+
+Notes:
+- `FORCE=1` re-runs both inference and aggregation; with `FORCE=0`, existing JSON and completed summaries may be reused when compatible.
 
 Main outputs:
 - `<OUTROOT>/cliplen_summary.csv`
@@ -546,6 +560,7 @@ Outputs:
 - `stage_tempo/full_local_slope_by_interval.svg`
 
 Interpretation:
+- `stage_tempo_full_summary.md` and `full_local_slope_by_interval.svg` are only emitted when the requested run includes `MODEL=full` and both `ID28C5_TEST` and `EXT25C_TEST`. Subset runs still write the CSV outputs.
 - `piecewise_stage_slopes.csv` is the primary inferential output for Comment 11: stagewise OLS slopes with embryo-bootstrap CIs.
 - `local_slope_by_interval.csv` is a descriptive companion view only.
 - The global anchored-fit summary remains the native ETF readout; stagewise slopes are used to test only modest stage dependence on top of that near-linear trend.
@@ -870,7 +885,7 @@ Notes:
 
 - `frame_tail*` stages test whether adapting high-level frame semantics is already sufficient.
 - `temporal_last*` / `temporal_head` are intended for models with an actual temporal stack (for example `full` and `nocons`).
-- On models whose forward path does not use temporal blocks, `temporal_last*` will not expose additional temporal parameters beyond the active readout path.
+- `analysis/run_sbiad840_finetune.py` now rejects `temporal_last*` / `temporal_head` for non-transformer checkpoints such as `cnn_single` and `meanpool`, instead of silently leaving the temporal blocks inactive.
 
 Recommended order:
 
@@ -937,7 +952,9 @@ bash scripts/43_eval_sbiad840_finetuned.sh
 Notes:
 
 - `43` is a thin wrapper around `analysis/eval_sbiad840_finetuned.py`.
+- `FT_CKPT` is required for this workflow. The fine-tuned evaluator no longer falls back to the released `CKPT_*` zero-shot checkpoints.
 - Dataset paths can be passed explicitly as above or resolved from `.env` by the Python helper.
+- `FORCE_INFER=1` is the default and is recommended when reusing an existing `OUTROOT`, because it avoids silently re-aggregating stale per-embryo JSON from an older checkpoint or inference configuration. Set `FORCE_INFER=0` only when you explicitly want to reuse the existing JSON cache.
 - Use the fine-tune split JSON for `SPLIT_28C5_SBIAD840` if you want the held-out `28.5C` numbers to match the rebuttal tables; use `28C5_sbiad840_test.json` only when evaluating on the full Princeton `28.5C` pool.
 - Default outputs are:
   - `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`
@@ -951,8 +968,8 @@ Princeton script matrix:
 |---|---|---|---|
 | `38_compare_sbiad840_kimmelnet.sh <BASE_OUTROOT> <DENSE_OUTROOT>` | compare ETF Princeton results against KimmelNet Table 1/2 using through-origin `y = mx` quantities | summarized zero-shot outroot; summarized dense `cnn_single` outroot | `<BASE_OUTROOT>/sbiad840_vs_kimmelnet.{csv,md}` |
 | `42_summarize_sbiad840_finetune.sh [OUT_DIR]` | summarize multiple Princeton fine-tune runs into one comparison table | `CNN_RUN_DIR`, `CNN_EVAL28_OUTROOT`, `CNN_EVAL25_OUTROOT`, `FULL_RUN_DIR`, `FULL_EVAL28_OUTROOT`, `FULL_EVAL25_OUTROOT` | `<OUT_DIR>/sbiad840_finetune_compare.{csv,md}` |
-| `43_eval_sbiad840_finetuned.sh [OUTROOT]` | evaluate one fine-tuned checkpoint on held-out Princeton datasets | `FT_CKPT`, `MODEL`; optional explicit Princeton proc/split paths | `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`, plus `<OUTROOT>/sbiad840_external_summary.{csv,md}` |
-| `44_stage_tempo_dependence.sh [OUTROOT] [OUT_DIR]` | stage-dependent tempo analysis with embryo-bootstrap stagewise slopes | aggregated ETF outroot; optional dataset/model/bootstrap overrides | `<OUT_DIR>/piecewise_stage_slopes.csv`, `local_slope_by_interval.csv`, `stage_delta_contrasts.csv`, `stage_tempo_full_summary.md`, `full_local_slope_by_interval.svg` |
+| `43_eval_sbiad840_finetuned.sh [OUTROOT]` | evaluate one fine-tuned checkpoint on held-out Princeton datasets | `FT_CKPT`, `MODEL`; optional explicit Princeton proc/split paths; optional `FORCE_INFER={0,1}` | `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`, plus `<OUTROOT>/sbiad840_external_summary.{csv,md}` |
+| `44_stage_tempo_dependence.sh [OUTROOT] [OUT_DIR]` | stage-dependent tempo analysis with embryo-bootstrap stagewise slopes | aggregated ETF outroot; optional dataset/model/bootstrap overrides | `<OUT_DIR>/piecewise_stage_slopes.csv`, `local_slope_by_interval.csv`, `stage_delta_contrasts.csv`; the ETF-full markdown/svg companions are emitted only when `models` include `full` and `datasets` include both `ID28C5_TEST` and `EXT25C_TEST` |
 
 ---
 
@@ -1189,6 +1206,11 @@ SPLIT_25C_SBIAD840=./data/sbiad840_aligned_4p5/splits/25C_sbiad840_test.json
 # 重要：保持 RUNS_DIR=./runs，因为 scripts/reproduce_all.sh 假定使用 ./runs
 RUNS_DIR=./runs
 
+# shell 入口脚本可选的解释器覆盖。
+# 如果当前 shell 里没有显式设置 PYTHON_BIN，scripts/* 会先从 .env 读取它，
+# 再继续加载其余环境变量。
+PYTHON_BIN=python3
+
 # 聚合脚本使用的时间轴常数
 DT_H=0.25
 T0_HPF=4.5
@@ -1295,6 +1317,7 @@ RUN_CONTINUOUS_POWER=0 RUN_CLIPLEN_SENSITIVITY=0 RUN_STAGE_ERROR_BINS=0 RUN_ANCH
 
 Thin-shell 说明：
 - `scripts/` 下的 shell 入口只负责环境加载、默认参数和一键编排
+- 如果当前 shell 里没有显式设置 `PYTHON_BIN`，这些 wrapper 会先从 `.env` 启动它，再加载其余环境变量
 - dataset/model 矩阵遍历、胚胎级调度、环境检查、aggregation、CI/power 批处理、以及顶层 pipeline 分支控制已经收敛到 Python：
   - `analysis/check_env.py`
   - `analysis/run_infer_matrix.py`
@@ -1303,6 +1326,76 @@ Thin-shell 说明：
   - `analysis/run_cliplen_sensitivity.py`
   - `analysis/select_best_embryo.py`
   - `analysis/run_reproduction_pipeline.py`
+
+`scripts/10_infer_all.sh` 常用覆盖参数：
+```bash
+OUTROOT=./runs/paper_eval_manual \
+DATASETS=ID28C5_TEST \
+MODELS=full \
+FORCE=1 \
+bash scripts/10_infer_all.sh
+```
+
+说明：
+- `FORCE=1` 会原地重跑本次请求范围内的 per-embryo JSON。只有当你明确想复用同一个 `OUTROOT` 下已有 JSON 时，才保留 `FORCE=0`。
+
+---
+
+## 可选：Clip 长度敏感性与 context ladder
+
+这个分析回答的问题和 power curve 不同：
+- 保持底层采样间隔固定为 `15 min`
+- 只改变推理时使用的 clip 长度（默认 `L=4/12/24`）
+- 把结果整理成 `0h`（`cnn_single`）对比 `1h/3h/6h`（`ETF-full`）的 context ladder
+
+默认情况下，这个分析也会在 `scripts/reproduce_all.sh` 中运行，除非设置 `RUN_CLIPLEN_SENSITIVITY=0`。
+
+### Step 1：运行固定 checkpoint 的 clip-length sensitivity
+推荐 shell 入口：
+```bash
+bash scripts/11_cliplen_sensitivity.sh
+```
+
+写到固定目录：
+```bash
+bash scripts/11_cliplen_sensitivity.sh runs/cliplen_sensitivity_main
+```
+
+常用覆盖参数：
+```bash
+DATASETS=ID28C5_TEST,EXT25C_TEST \
+MODELS=full \
+CLIP_LENS=4,12,24 \
+FORCE=1 \
+bash scripts/11_cliplen_sensitivity.sh
+```
+
+说明：
+- `FORCE=1` 会同时重跑推理和聚合；当 `FORCE=0` 时，如果已有 JSON 和 summary 与当前请求兼容，脚本会复用已有结果。
+
+主要输出：
+- `<OUTROOT>/cliplen_summary.csv`
+- `<OUTROOT>/L04/...`、`<OUTROOT>/L12/...`、`<OUTROOT>/L24/...`
+
+### Step 2：整理成紧凑的 `0h/1h/3h/6h` context ladder
+推荐 shell 入口：
+```bash
+bash scripts/12_cliplen_context_fit.sh \
+  runs/paper_eval_20260225_232506 \
+  runs/cliplen_sensitivity_20260311_030252
+```
+
+也可以直接调用 Python：
+```bash
+python analysis/cliplen_context_fit.py \
+  --main_outroot runs/paper_eval_20260225_232506 \
+  --cliplen_csv runs/cliplen_sensitivity_20260311_030252/cliplen_summary.csv \
+  --out_dir runs/cliplen_sensitivity_20260311_030252/context_fit
+```
+
+输出：
+- `context_fit/context_ladder.csv`
+- `context_fit/full_context_fit.csv`
 
 ---
 
@@ -1343,6 +1436,7 @@ python analysis/stage_tempo_dependence.py \
 - `stage_tempo/full_local_slope_by_interval.svg`
 
 说明：
+- 如果 `--models` 不包含 `full`，或者 `--datasets` 没有同时包含 `ID28C5_TEST` 和 `EXT25C_TEST`，脚本仍会正常写出 CSV，但会跳过 `ETF-full` 专用的 markdown 摘要和 SVG 图。
 - `piecewise_stage_slopes.csv` 按 Kimmel broad periods（blastula / gastrula / segmentation / pharyngula）分别拟合局部线性斜率。
 - 这些分段斜率的 95% CI 是按 embryo (`eid`) 做 bootstrap 得到的，因此遵循 embryo-level 而不是 window-level 独立性。
 - `stage_delta_contrasts.csv` 给出不同阶段 slowdown 强度之间的 bootstrap 对比。
@@ -1658,7 +1752,7 @@ LR=3e-4
 
 - `frame_tail*` 主要用于测试“只适配高层视觉语义”是否已经足够。
 - `temporal_last*` / `temporal_head` 主要用于真正带 temporal stack 的模型（例如 `full`、`nocons`）。
-- 对于前向路径里本来就不使用 temporal blocks 的模型，`temporal_last*` 不会额外放出真正的时序参数。
+- `analysis/run_sbiad840_finetune.py` 现在会直接拒绝把 `temporal_last*` / `temporal_head` 用在 `cnn_single`、`meanpool` 这类非 transformer checkpoint 上，而不是静默保留一个名义上“temporal”但实际上不起作用的 stage。
 
 3. 微调完成后，可把多个 Princeton adaptation 结果汇总成统一对照表：
 
@@ -1713,7 +1807,9 @@ bash scripts/43_eval_sbiad840_finetuned.sh
 说明：
 
 - `43` 现在只是 `analysis/eval_sbiad840_finetuned.py` 的薄包装，shell 不再自己串联 inference / aggregation / summarize。
+- 这个流程必须显式提供 `FT_CKPT`；它不再回退到发布版 `CKPT_*` 的 zero-shot checkpoint。
 - Princeton 数据路径既可以像上面这样显式给出，也可以由 Python 端从 `.env` 读取。
+- `FORCE_INFER=1` 是默认值，也是在复用同一个 `OUTROOT` 时的推荐值，因为它能避免把旧 checkpoint 或旧推理参数留下来的 JSON 误当成新结果重新汇总。只有当你明确想复用现有 JSON 缓存时，才设置 `FORCE_INFER=0`。
 - 如果你要复现 rebuttal 里 held-out `28.5C` 的微调结果，`SPLIT_28C5_SBIAD840` 应指向 fine-tune split JSON；若改回 `28C5_sbiad840_test.json`，则是在完整 Princeton `28.5C` 外部池上评估。
 - 默认输出：
   - `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`
@@ -1727,8 +1823,8 @@ Princeton 脚本真值表：
 |---|---|---|---|
 | `38_compare_sbiad840_kimmelnet.sh <BASE_OUTROOT> <DENSE_OUTROOT>` | 用过原点 `y = mx` 口径把 ETF Princeton 结果和 KimmelNet Table 1/2 对齐比较 | 已汇总的 zero-shot outroot；已汇总的 dense `cnn_single` outroot | `<BASE_OUTROOT>/sbiad840_vs_kimmelnet.{csv,md}` |
 | `42_summarize_sbiad840_finetune.sh [OUT_DIR]` | 把多个 Princeton 微调实验汇总成一张对照表 | `CNN_RUN_DIR`、`CNN_EVAL28_OUTROOT`、`CNN_EVAL25_OUTROOT`、`FULL_RUN_DIR`、`FULL_EVAL28_OUTROOT`、`FULL_EVAL25_OUTROOT` | `<OUT_DIR>/sbiad840_finetune_compare.{csv,md}` |
-| `43_eval_sbiad840_finetuned.sh [OUTROOT]` | 对单个微调 checkpoint 做 Princeton held-out 外部评估 | `FT_CKPT`、`MODEL`；Princeton proc/split 路径可显式给出，也可从 `.env` 解析 | `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`，以及 `<OUTROOT>/sbiad840_external_summary.{csv,md}` |
-| `44_stage_tempo_dependence.sh [OUTROOT] [OUT_DIR]` | 做阶段依赖 tempo 分析，并输出 embryo-bootstrap 分段斜率 | 已聚合的 ETF outroot；可选 dataset/model/bootstrap 覆盖 | `<OUT_DIR>/piecewise_stage_slopes.csv`、`local_slope_by_interval.csv`、`stage_delta_contrasts.csv`、`stage_tempo_full_summary.md`、`full_local_slope_by_interval.svg` |
+| `43_eval_sbiad840_finetuned.sh [OUTROOT]` | 对单个微调 checkpoint 做 Princeton held-out 外部评估 | `FT_CKPT`、`MODEL`；Princeton proc/split 路径可显式给出，也可从 `.env` 解析；`FORCE_INFER={0,1}` 可选 | `<OUTROOT>/SBIAD840_*/<MODEL>/{json,points.csv,embryo.csv,summary.json}`，以及 `<OUTROOT>/sbiad840_external_summary.{csv,md}` |
+| `44_stage_tempo_dependence.sh [OUTROOT] [OUT_DIR]` | 做阶段依赖 tempo 分析，并输出 embryo-bootstrap 分段斜率 | 已聚合的 ETF outroot；可选 dataset/model/bootstrap 覆盖 | `<OUT_DIR>/piecewise_stage_slopes.csv`、`local_slope_by_interval.csv`、`stage_delta_contrasts.csv`；只有在 `models` 包含 `full` 且 `datasets` 同时包含 `ID28C5_TEST` 与 `EXT25C_TEST` 时，才额外生成 ETF-full 的 markdown/SVG 摘要 |
 
 建议顺序：
 

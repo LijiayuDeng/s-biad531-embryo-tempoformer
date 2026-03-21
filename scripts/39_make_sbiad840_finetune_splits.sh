@@ -2,10 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
 
 if [ -f ".env" ]; then
-  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
+  load_repo_env_if_present ".env"
 fi
 
 SOURCE_SPLIT="${SOURCE_SPLIT:-${SPLIT_28C5_SBIAD840:-./data/sbiad840_aligned_4p5/splits/28C5_sbiad840_test.json}}"

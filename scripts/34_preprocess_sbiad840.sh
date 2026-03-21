@@ -2,7 +2,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
 
 # Convert the S-BIAD840 Princeton_Data PNG export into ETF-style processed npy.
 #
@@ -17,7 +18,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 #   bash scripts/34_preprocess_sbiad840.sh
 
 if [ -f ".env" ]; then
-  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
+  load_repo_env_if_present ".env"
 fi
 
 SRC_ROOT="${SRC_ROOT:-${SBIAD840_SRC_ROOT:-/home/lichi/work/s-biad840/Files/Princeton_Data}}"

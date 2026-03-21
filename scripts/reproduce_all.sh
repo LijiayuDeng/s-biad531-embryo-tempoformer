@@ -2,13 +2,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+# shellcheck disable=SC1091
+source scripts/_shell_env.sh
 
 if [ -f ".env" ]; then
-  set -a
-  # shellcheck disable=SC1091
-  eval "$("$PYTHON_BIN" analysis/dotenv_shell.py --env-file .env)"
-  set +a
+  load_repo_env_if_present ".env"
 fi
 
 "$PYTHON_BIN" analysis/run_reproduction_pipeline.py "$@"
