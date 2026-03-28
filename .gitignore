@@ -32,3 +32,6 @@ processed*/
 
 # logs
 *.log
+
+# local archives
+sbiad840_aligned_4p5.tar.gz
