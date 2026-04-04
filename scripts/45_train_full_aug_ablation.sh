@@ -23,8 +23,11 @@ AMP="${AMP:-1}"
 USE_EMA_FLAG="${USE_EMA_FLAG:---ema_eval}"
 MEM_PROFILE="${MEM_PROFILE:-lowmem}"
 EPOCHS="${EPOCHS:-300}"
-BATCH_SIZE="${BATCH_SIZE:-64}"
-VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-128}"
+# Default to a long-run sweet spot on the 32 GiB RTX 5090: aggressive enough
+# to retain most of the throughput gain over the released 32/64 setup, while
+# leaving more headroom than the ~29 GiB bs64/val128 configuration.
+BATCH_SIZE="${BATCH_SIZE:-48}"
+VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-96}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 SAMPLES_PER_EMBRYO="${SAMPLES_PER_EMBRYO:-32}"
 CACHE_ITEMS="${CACHE_ITEMS:-16}"

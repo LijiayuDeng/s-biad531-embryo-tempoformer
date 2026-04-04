@@ -662,7 +662,7 @@ class PairQueueDataset(Dataset):
       clip1 starting at s1 and clip2 starting at s2
 
     Returned fields:
-      x1, x2 : float tensors [L,1,H,W] in [0,1]
+      x1, x2 : uint8 tensors [L,1,H,W]
       offset1, offset2 : scalar targets in hours (T0_HPF + DT_H*s)
       start1, start2 : start indices (integers)
 
@@ -754,8 +754,10 @@ class PairQueueDataset(Dataset):
             clip1 = apply_augment_clip_u8(clip1, self.rng, self.aug)
             clip2 = apply_augment_clip_u8(clip2, self.rng, self.aug)
 
-        x1 = torch.from_numpy(np.ascontiguousarray(clip1)).unsqueeze(1).float() / 255.0
-        x2 = torch.from_numpy(np.ascontiguousarray(clip2)).unsqueeze(1).float() / 255.0
+        # Keep clips as uint8 inside DataLoader workers to reduce host-memory
+        # pressure from prefetched batches. Normalization happens on-device.
+        x1 = torch.from_numpy(np.ascontiguousarray(clip1)).unsqueeze(1)
+        x2 = torch.from_numpy(np.ascontiguousarray(clip2)).unsqueeze(1)
 
         o1 = float(T0_HPF + DT_H * s1)
         o2 = float(T0_HPF + DT_H * s2)
@@ -779,7 +781,7 @@ class DeterministicValDataset(Dataset):
       s = 0..(T - clip_len)
 
     Output sample:
-      x : [L,1,H,W] float in [0,1]
+      x : [L,1,H,W] uint8
       target : scalar offset time (hours)
 
     Note on statistics:
@@ -814,7 +816,9 @@ class DeterministicValDataset(Dataset):
             pad = self.clip_len - clip.shape[0]
             clip = np.concatenate([clip, np.repeat(clip[-1:], pad, axis=0)], axis=0)
 
-        x = torch.from_numpy(np.ascontiguousarray(clip)).unsqueeze(1).float() / 255.0
+        # Validation clips stay uint8 until they reach the device for the same
+        # host-memory reason as training clips.
+        x = torch.from_numpy(np.ascontiguousarray(clip)).unsqueeze(1)
         target = float(T0_HPF + DT_H * s)
         return {"eid": eid, "start": int(s), "x": x, "target": torch.tensor(target, dtype=torch.float32)}
 
@@ -1471,6 +1475,18 @@ def _abs_loss(pred: torch.Tensor, target: torch.Tensor, kind: str) -> torch.Tens
     return F.l1_loss(pred, target)
 
 
+def _move_clip_batch_to_device(x: torch.Tensor, device: torch.device, amp: bool) -> torch.Tensor:
+    """
+    Move a uint8 clip batch to `device` and normalize it to [0, 1].
+
+    Keeping clips as uint8 inside DataLoader workers greatly reduces host-memory
+    pressure from prefetched batches. We cast only after transfer.
+    """
+    target_dtype = torch.float16 if (amp and device.type == "cuda") else torch.float32
+    x = x.to(device=device, dtype=target_dtype, non_blocking=True)
+    return x.div_(255.0)
+
+
 def train_one_epoch(
     model,
     dl_train,
@@ -1514,16 +1530,12 @@ def train_one_epoch(
     local_iter = 0
 
     for batch in dl_train:
-        x1 = batch["x1"].to(device, non_blocking=True)
-        x2 = batch["x2"].to(device, non_blocking=True)
+        x1 = _move_clip_batch_to_device(batch["x1"], device, amp=cfg.amp)
+        x2 = _move_clip_batch_to_device(batch["x2"], device, amp=cfg.amp)
         t1 = batch["offset1"].to(device, non_blocking=True)
         t2 = batch["offset2"].to(device, non_blocking=True)
         s1 = batch["start1"].to(device, non_blocking=True).float()
         s2 = batch["start2"].to(device, non_blocking=True).float()
-
-        if cfg.amp and device.type == "cuda":
-            x1 = x1.half()
-            x2 = x2.half()
 
         B = x1.shape[0]
 
@@ -1624,11 +1636,8 @@ def validate(model, dl_val, device: torch.device, ddp: bool, cfg: TrainConfig) -
     autocast_ctx = torch.cuda.amp.autocast if device.type == "cuda" else None
 
     for batch in dl_val:
-        x = batch["x"].to(device, non_blocking=True)
+        x = _move_clip_batch_to_device(batch["x"], device, amp=cfg.amp)
         y = batch["target"].to(device, non_blocking=True)
-
-        if cfg.amp and device.type == "cuda":
-            x = x.half()
 
         if autocast_ctx is not None:
             with autocast_ctx(enabled=(cfg.amp and device.type == "cuda")):
