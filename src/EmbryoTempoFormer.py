@@ -199,11 +199,11 @@ def dump_run_config(out_dir: Path, cfg: "TrainConfig") -> None:
     This is a lightweight provenance record:
     - training config
     - memory profile details
-    - augmentation defaults
+    - augmentation settings actually used for training
     - basic environment info (torch/cuda/cudnn)
     """
     mp = MEM_PROFILES.get(cfg.mem_profile, MEM_PROFILES["balanced"])
-    aug = AugParams()
+    aug = build_aug_params(cfg.aug_disable_groups)
     env = {
         "torch": torch.__version__,
         "cuda": torch.version.cuda,
@@ -215,6 +215,7 @@ def dump_run_config(out_dir: Path, cfg: "TrainConfig") -> None:
         "train_config": dataclasses.asdict(cfg),
         "mem_profile_detail": mp,
         "augment": dataclasses.asdict(aug),
+        "augment_disable_groups": sorted(parse_csv_groups(cfg.aug_disable_groups)),
         "env": env,
     }
     jdump(payload, out_dir / "run_config.json")
@@ -471,6 +472,52 @@ class AugParams:
 
     p_frame_drop: float = 0.10
     frame_drop_max: int = 2
+
+
+def parse_csv_groups(text: str) -> set[str]:
+    """Parse a comma-separated list into a normalized lowercase token set."""
+    if not text:
+        return set()
+    return {tok.strip().lower() for tok in text.split(",") if tok.strip()}
+
+
+def build_aug_params(disable_groups: str = "") -> AugParams:
+    """
+    Build augmentation parameters after disabling named augmentation families.
+
+    Supported group names:
+      - spatial: hflip + affine
+      - photometric: gamma + contrast + brightness + shade
+      - acquisition: noise + blur
+      - temporal: frame_drop
+
+    Note:
+      start-index jitter is handled separately in PairQueueDataset and is not part
+      of AugParams. To disable the full temporal/sampling family in experiments,
+      set `--jitter 0` together with `--aug_disable_groups temporal`.
+    """
+    groups = parse_csv_groups(disable_groups)
+    valid = {"spatial", "photometric", "acquisition", "temporal"}
+    unknown = sorted(groups - valid)
+    if unknown:
+        raise ValueError(f"Unknown augmentation group(s): {', '.join(unknown)}")
+
+    aug = AugParams()
+    if "spatial" in groups:
+        aug.p_hflip = 0.0
+        aug.p_affine = 0.0
+    if "photometric" in groups:
+        aug.p_gamma = 0.0
+        aug.p_contrast = 0.0
+        aug.p_brightness = 0.0
+        aug.p_shade = 0.0
+    if "acquisition" in groups:
+        aug.p_noise = 0.0
+        aug.p_blur = 0.0
+    if "temporal" in groups:
+        aug.p_frame_drop = 0.0
+        aug.frame_drop_max = 0
+    return aug
 
 
 def _apply_box_blur_u8(frame_u8: np.ndarray, k: int) -> np.ndarray:
@@ -1188,6 +1235,7 @@ class TrainConfig:
     num_workers: int = 8
     samples_per_embryo: int = 32
     jitter: int = 2
+    aug_disable_groups: str = ""
     cache_items: int = 16
 
     epochs: int = 200
@@ -1315,7 +1363,7 @@ def build_loaders(cfg: TrainConfig, ddp: bool):
     sp = jload(cfg.split_json)
     train_ids = filter_excluded(sp["train"])
     val_ids = filter_excluded(sp["val"])
-    aug = AugParams()
+    aug = build_aug_params(cfg.aug_disable_groups)
 
     ds_train = PairQueueDataset(
         Path(cfg.proc_dir), train_ids, cfg.clip_len,
@@ -1635,7 +1683,8 @@ def cmd_train(args):
         proc_dir=args.proc_dir, split_json=args.split_json, out_dir=args.out_dir,
         clip_len=args.clip_len, img_size=args.img_size, expect_t=args.expect_t,
         batch_size=args.batch_size, val_batch_size=args.val_batch_size, num_workers=args.num_workers,
-        samples_per_embryo=args.samples_per_embryo, jitter=args.jitter, cache_items=args.cache_items,
+        samples_per_embryo=args.samples_per_embryo, jitter=args.jitter,
+        aug_disable_groups=args.aug_disable_groups, cache_items=args.cache_items,
         epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, warmup_ratio=args.warmup_ratio,
         lr_min_ratio=args.lr_min_ratio, max_grad_norm=args.max_grad_norm, grad_accum=args.grad_accum,
         model_dim=args.model_dim, model_depth=args.model_depth, model_heads=args.model_heads,
@@ -2105,6 +2154,12 @@ def build_parser():
     sp.add_argument("--num_workers", type=int, default=8)
     sp.add_argument("--samples_per_embryo", type=int, default=32)
     sp.add_argument("--jitter", type=int, default=2)
+    sp.add_argument(
+        "--aug_disable_groups",
+        type=str,
+        default="",
+        help="Comma-separated augmentation families to disable: spatial, photometric, acquisition, temporal",
+    )
     sp.add_argument("--cache_items", type=int, default=16)
 
     sp.add_argument("--lr", type=float, default=6e-4)
