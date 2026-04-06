@@ -17,11 +17,31 @@ PROC_DIR="${PROC_DIR:-${PROC_28C5:-}}"
 SPLIT_JSON="${SPLIT_JSON:-${SPLIT_28C5:-}}"
 SETTINGS="${SETTINGS:-baseline_full,no_spatial,no_photometric,no_acquisition,no_temporal_sampling}"
 DRY_RUN="${DRY_RUN:-0}"
+GPU_PRESET="$(printf '%s' "${GPU_PRESET:-rtx5090}" | tr '[:upper:]' '[:lower:]')"
 
 DEVICE="${DEVICE:-cuda}"
 AMP="${AMP:-1}"
 USE_EMA_FLAG="${USE_EMA_FLAG:---ema_eval}"
-MEM_PROFILE="${MEM_PROFILE:-lowmem}"
+case "$GPU_PRESET" in
+  l40s)
+    : "${MEM_PROFILE:=lowmem}"
+    # Empirically probed on this workspace's L40S with a real 1-epoch
+    # baseline_full smoke test:
+    #   bs=96 / vbs=192 -> peak ~43.3 GB
+    #   bs=88 / vbs=176 -> peak ~39.7 GB
+    # Keep the default L40S preset near the requested ~40 GB ceiling.
+    : "${BATCH_SIZE:=88}"
+    : "${VAL_BATCH_SIZE:=176}"
+    : "${NUM_WORKERS:=16}"
+    ;;
+  rtx5090|"")
+    : "${MEM_PROFILE:=lowmem}"
+    : "${NUM_WORKERS:=16}"
+    ;;
+  *)
+    : "${MEM_PROFILE:=lowmem}"
+    ;;
+esac
 EPOCHS="${EPOCHS:-300}"
 # Default to a long-run sweet spot on the 32 GiB RTX 5090: aggressive enough
 # to retain most of the throughput gain over the released 32/64 setup, while
@@ -33,7 +53,7 @@ SAMPLES_PER_EMBRYO="${SAMPLES_PER_EMBRYO:-32}"
 CACHE_ITEMS="${CACHE_ITEMS:-16}"
 GRAD_ACCUM="${GRAD_ACCUM:-1}"
 SAVE_EVERY="${SAVE_EVERY:-25}"
-PATIENCE="${PATIENCE:-0}"
+PATIENCE="${PATIENCE:-20}"
 SEED="${SEED:-42}"
 LR="${LR:-0.0006}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
@@ -72,6 +92,7 @@ echo "[INFO] OUTROOT=$OUTROOT"
 echo "[INFO] PROC_DIR=$PROC_DIR"
 echo "[INFO] SPLIT_JSON=$SPLIT_JSON"
 echo "[INFO] SETTINGS=$SETTINGS"
+echo "[INFO] GPU_PRESET=$GPU_PRESET"
 echo "[INFO] PYTHON_BIN=$PYTHON_BIN"
 
 AMP_FLAG="--amp"

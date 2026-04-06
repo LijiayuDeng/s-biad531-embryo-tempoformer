@@ -1786,6 +1786,7 @@ def cmd_train(args):
     start_epoch = 0
     global_step = 0
     best_mae = float("inf")
+    epochs_without_improve = 0
 
     if cfg.resume:
         raw = model.module if isinstance(model, DDP) else model
@@ -1810,6 +1811,7 @@ def cmd_train(args):
         t0 = time.time()
         if device.type == "cuda":
             torch.cuda.reset_peak_memory_stats()
+        should_stop = False
 
         train_m, global_step = train_one_epoch(
             model, dl_train, optimizer, scheduler, scaler, ema,
@@ -1847,12 +1849,31 @@ def cmd_train(args):
 
             if val_m["mae"] + 1e-9 < best_mae:
                 best_mae = float(val_m["mae"])
+                epochs_without_improve = 0
                 save_checkpoint(out_dir / "best.pt", model, optimizer, scheduler, scaler, ema, epoch, global_step, cfg, best_mae)
+            else:
+                epochs_without_improve += 1
 
             print(f"[epoch {epoch}] train_mae={train_m['mae']:.3f} val_mae={val_m['mae']:.3f} lr={lr_cur:.2e} mem={mem_gb:.1f}GB profile={cfg.mem_profile}")
 
+            if cfg.patience > 0 and epochs_without_improve >= int(cfg.patience):
+                print(
+                    f"[early-stop] no val_mae improvement for {epochs_without_improve} epoch(s); "
+                    f"stopping at epoch {epoch} with best_mae={best_mae:.6f}"
+                )
+                should_stop = True
+
+        if ddp:
+            stop_flag = torch.tensor([1 if should_stop else 0], device=device, dtype=torch.int32)
+            dist.all_reduce(stop_flag, op=dist.ReduceOp.MAX)
+            should_stop = bool(int(stop_flag.item()) > 0)
+
+        if should_stop:
+            break
+
     if ddp_is_main():
-        save_checkpoint(out_dir / "last.pt", model, optimizer, scheduler, scaler, ema, cfg.epochs - 1, global_step, cfg, best_mae)
+        last_epoch_done = epoch if "epoch" in locals() else max(0, start_epoch - 1)
+        save_checkpoint(out_dir / "last.pt", model, optimizer, scheduler, scaler, ema, last_epoch_done, global_step, cfg, best_mae)
 
     if ddp:
         dist.destroy_process_group()
