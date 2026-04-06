@@ -790,10 +790,11 @@ class DeterministicValDataset(Dataset):
       unit for hypothesis testing; use embryo-level inference in analysis.
     """
 
-    def __init__(self, proc_dir: Path, embryo_ids: Sequence[str], clip_len: int):
+    def __init__(self, proc_dir: Path, embryo_ids: Sequence[str], clip_len: int, cache_items: int = 16):
         self.proc_dir = Path(proc_dir)
         self.clip_len = int(clip_len)
         self.embryo_ids = filter_excluded(list(embryo_ids))
+        self._cache = _LRUCache(max_items=cache_items)
         self.samples: List[Tuple[str, int]] = []
         for eid in self.embryo_ids:
             T = load_frames_T(self.proc_dir, eid)
@@ -806,7 +807,11 @@ class DeterministicValDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         eid, s = self.samples[idx]
-        frames = load_frames_memmap(self.proc_dir, eid)
+        cached = self._cache.get(eid)
+        if cached is None:
+            cached = load_frames_memmap(self.proc_dir, eid)
+            self._cache.put(eid, cached)
+        frames = cached
         T = int(frames.shape[0])
         max_start_real = max(0, int(T - self.clip_len))
         s = int(np.clip(s, 0, max_start_real))
@@ -1241,6 +1246,7 @@ class TrainConfig:
     jitter: int = 2
     aug_disable_groups: str = ""
     cache_items: int = 16
+    val_cache_items: int = 16
 
     epochs: int = 200
     lr: float = 6e-4
@@ -1288,6 +1294,7 @@ class TrainConfig:
     unfreeze_temporal_tail_blocks: int = 0
     save_every: int = 1
     patience: int = 0
+    val_every: int = 1
 
 
 def build_model(cfg: TrainConfig) -> nn.Module:
@@ -1374,7 +1381,7 @@ def build_loaders(cfg: TrainConfig, ddp: bool):
         True, aug, cfg.seed,
         cfg.samples_per_embryo, cfg.jitter, cfg.cache_items
     )
-    ds_val = DeterministicValDataset(Path(cfg.proc_dir), val_ids, cfg.clip_len)
+    ds_val = DeterministicValDataset(Path(cfg.proc_dir), val_ids, cfg.clip_len, cache_items=cfg.val_cache_items)
 
     train_sampler = DistributedSampler(ds_train, shuffle=True) if ddp else None
     val_sampler = DistributedSampler(ds_val, shuffle=False) if ddp else None
@@ -1693,7 +1700,7 @@ def cmd_train(args):
         clip_len=args.clip_len, img_size=args.img_size, expect_t=args.expect_t,
         batch_size=args.batch_size, val_batch_size=args.val_batch_size, num_workers=args.num_workers,
         samples_per_embryo=args.samples_per_embryo, jitter=args.jitter,
-        aug_disable_groups=args.aug_disable_groups, cache_items=args.cache_items,
+        aug_disable_groups=args.aug_disable_groups, cache_items=args.cache_items, val_cache_items=args.val_cache_items,
         epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay, warmup_ratio=args.warmup_ratio,
         lr_min_ratio=args.lr_min_ratio, max_grad_norm=args.max_grad_norm, grad_accum=args.grad_accum,
         model_dim=args.model_dim, model_depth=args.model_depth, model_heads=args.model_heads,
@@ -1708,7 +1715,7 @@ def cmd_train(args):
         unfreeze_frame_proj=args.unfreeze_frame_proj,
         unfreeze_frame_tail_blocks=args.unfreeze_frame_tail_blocks,
         unfreeze_temporal_tail_blocks=args.unfreeze_temporal_tail_blocks,
-        save_every=args.save_every, patience=args.patience
+        save_every=args.save_every, patience=args.patience, val_every=args.val_every
     )
 
     device, ddp = ddp_init()
@@ -1819,17 +1826,20 @@ def cmd_train(args):
             total_optim_steps=total_optim_steps,
         )
 
-        # EMA eval swap
-        backup = None
-        if ema is not None and cfg.ema_eval:
-            raw = model.module if isinstance(model, DDP) else model
-            backup = ema.copy_to(raw)
+        run_val = ((epoch + 1) % max(1, int(cfg.val_every)) == 0) or (epoch == cfg.epochs - 1)
+        val_m = {"loss": float("nan"), "mae": float("nan"), "rmse": float("nan"), "r2": float("nan")}
+        if run_val:
+            # EMA eval swap
+            backup = None
+            if ema is not None and cfg.ema_eval:
+                raw = model.module if isinstance(model, DDP) else model
+                backup = ema.copy_to(raw)
 
-        val_m = validate(model, dl_val, device, ddp, cfg)
+            val_m = validate(model, dl_val, device, ddp, cfg)
 
-        if backup is not None and ema is not None:
-            raw = model.module if isinstance(model, DDP) else model
-            ema.restore(raw, backup)
+            if backup is not None and ema is not None:
+                raw = model.module if isinstance(model, DDP) else model
+                ema.restore(raw, backup)
 
         secs = time.time() - t0
         lr_cur = scheduler.get_last_lr()[0]
@@ -1847,16 +1857,20 @@ def cmd_train(args):
             if (epoch + 1) % cfg.save_every == 0:
                 save_checkpoint(ckpt_dir / f"epoch{epoch+1}.pt", model, optimizer, scheduler, scaler, ema, epoch, global_step, cfg, best_mae)
 
-            if val_m["mae"] + 1e-9 < best_mae:
+            if run_val and val_m["mae"] + 1e-9 < best_mae:
                 best_mae = float(val_m["mae"])
                 epochs_without_improve = 0
                 save_checkpoint(out_dir / "best.pt", model, optimizer, scheduler, scaler, ema, epoch, global_step, cfg, best_mae)
-            else:
+            elif run_val:
                 epochs_without_improve += 1
 
-            print(f"[epoch {epoch}] train_mae={train_m['mae']:.3f} val_mae={val_m['mae']:.3f} lr={lr_cur:.2e} mem={mem_gb:.1f}GB profile={cfg.mem_profile}")
+            print(
+                f"[epoch {epoch}] train_mae={train_m['mae']:.3f} "
+                f"val_mae={val_m['mae']:.3f} lr={lr_cur:.2e} mem={mem_gb:.1f}GB "
+                f"profile={cfg.mem_profile} val_run={int(run_val)}"
+            )
 
-            if cfg.patience > 0 and epochs_without_improve >= int(cfg.patience):
+            if run_val and cfg.patience > 0 and epochs_without_improve >= int(cfg.patience):
                 print(
                     f"[early-stop] no val_mae improvement for {epochs_without_improve} epoch(s); "
                     f"stopping at epoch {epoch} with best_mae={best_mae:.6f}"
@@ -2191,6 +2205,7 @@ def build_parser():
         help="Comma-separated augmentation families to disable: spatial, photometric, acquisition, temporal",
     )
     sp.add_argument("--cache_items", type=int, default=16)
+    sp.add_argument("--val_cache_items", type=int, default=16)
 
     sp.add_argument("--lr", type=float, default=6e-4)
     sp.add_argument("--weight_decay", type=float, default=0.01)
@@ -2236,6 +2251,7 @@ def build_parser():
     sp.add_argument("--unfreeze_temporal_tail_blocks", type=int, default=0, help="After freezing temporal modules, re-enable the last N temporal blocks plus cls/norm.")
     sp.add_argument("--save_every", type=int, default=1)
     sp.add_argument("--patience", type=int, default=0)
+    sp.add_argument("--val_every", type=int, default=1, help="Run full validation every N epochs (always runs on the final epoch).")
 
     sp.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     sp.add_argument("--ema_decay", type=float, default=0.0)
