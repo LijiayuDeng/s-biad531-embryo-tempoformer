@@ -30,6 +30,7 @@ EmbryoTempoFormer (ETF) is a **paper-grade reproducible pipeline** for:
 - [Expected outputs](#expected-outputs)
 - [Optional: SmoothGrad saliency](#optional-smoothgrad-saliency)
 - [Metrics notes (external 25C)](#metrics-notes-external-25c)
+- [Optional: Minimal Augmentation Ablation](#optional-minimal-augmentation-ablation)
 - [Optional: Training specification (EXP4; from checkpoint cfg)](#optional-training-specification-exp4-from-checkpoint-cfg)
 - [Optional: Option A (preprocess from raw OME-TIFF)](#optional-option-a-preprocess-from-raw-ome-tiff)
 - [ETF CLI quick reference](#etf-cli-quick-reference)
@@ -973,6 +974,77 @@ Princeton script matrix:
 
 ---
 
+## Optional: Minimal Augmentation Ablation
+
+For the final minor-revision augmentation analysis, the repository includes a
+matched five-setting remove-one-family ablation for `ETF-full`:
+
+- `baseline_full`
+- `no_spatial`
+- `no_photometric`
+- `no_acquisition`
+- `no_temporal_sampling`
+
+Related scripts:
+
+- `scripts/45_train_full_aug_ablation.sh` — train the five matched ablation runs
+- `scripts/46_tmux_full_aug_ablation.sh` — launch `45` inside `tmux`
+- `scripts/47_run_min_aug_ablation_package.sh` — train, evaluate on `ID28C5_TEST` / `EXT25C_TEST`, aggregate, and summarize the full ablation package
+
+Augmentation-family mapping:
+
+- `spatial`: horizontal flip + shared affine transform
+- `photometric`: gamma + contrast + brightness + low-frequency shade
+- `acquisition`: additive noise + blur
+- `temporal_sampling`: frame-drop augmentation plus start-index jitter
+
+`no_temporal_sampling` is implemented as `--aug_disable_groups temporal` **and**
+`jitter=0`, so it removes both frame-drop perturbation and sampling-time start
+jitter.
+
+Typical run:
+
+```bash
+GPU_PRESET=l40s \
+BATCH_SIZE=88 VAL_BATCH_SIZE=176 \
+MEM_PROFILE=lowmem PATIENCE=20 \
+bash scripts/47_run_min_aug_ablation_package.sh ./runs/min_aug_ablation_l40s
+```
+
+Default outputs:
+
+- `<OUTROOT>/<setting>/best.pt`
+- `<OUTROOT>/<setting>/history.csv`
+- `<OUTROOT>/<setting>/run_config.json`
+- `<OUTROOT>/<setting>/eval_main/ID28C5_TEST/full/{json,points.csv,embryo.csv,summary.json}`
+- `<OUTROOT>/<setting>/eval_main/EXT25C_TEST/full/{json,points.csv,embryo.csv,summary.json}`
+- `<OUTROOT>/min_aug_ablation_summary.csv`
+- `<OUTROOT>/min_aug_ablation_summary.md`
+
+Representative configuration used in the rebuttal package:
+
+- model: `ETF-full`
+- seed: `42`
+- training cap: `300` epochs with `patience=20`
+- `batch_size=88`, `val_batch_size=176`
+- `AMP=1`, `mem_profile=lowmem`
+- single `NVIDIA L40S` GPU (`46068 MiB`)
+
+Observed run characteristics for the five rebuttal ablation settings:
+
+| Setting | Best val epoch | Best val MAE (h) | Mean runtime / epoch | Total training walltime | Peak GPU memory |
+|---|---:|---:|---:|---:|---:|
+| `baseline_full` | `122` | `0.923` | `270.7 s` | `10.75 h` | `39.81 GB` |
+| `no_spatial` | `68` | `1.241` | `265.1 s` | `6.55 h` | `39.81 GB` |
+| `no_photometric` | `157` | `0.684` | `267.8 s` | `13.24 h` | `39.81 GB` |
+| `no_acquisition` | `54` | `0.862` | `265.3 s` | `5.53 h` | `39.81 GB` |
+| `no_temporal_sampling` | `133` | `0.816` | `271.0 s` | `11.59 h` | `39.81 GB` |
+
+This ablation is intended as a matched single-seed sensitivity analysis rather
+than as a new hyperparameter search replacing the released benchmark.
+
+---
+
 ## ETF CLI quick reference
 
 ```bash
@@ -1067,6 +1139,7 @@ MIT (see LICENSE).
 - 你应该看到哪些输出
 - 可选：SmoothGrad 热图
 - 指标说明（外域 25C）
+- 可选：最小增强消融实验
 - 可选：训练规格（EXP4；以 checkpoint cfg 为准）
 - 可选：Option A（从原始 OME-TIFF 预处理）
 - ETF CLI 速查
@@ -1839,6 +1912,75 @@ Princeton 脚本真值表：
 
 ---
 
+## 可选：最小增强消融实验
+
+针对 final minor revision 中新增的 augmentation 响应，仓库现提供一个
+`ETF-full` 的五设置 remove-one-family 增强消融：
+
+- `baseline_full`
+- `no_spatial`
+- `no_photometric`
+- `no_acquisition`
+- `no_temporal_sampling`
+
+相关脚本：
+
+- `scripts/45_train_full_aug_ablation.sh`：训练五组匹配的消融实验
+- `scripts/46_tmux_full_aug_ablation.sh`：在 `tmux` 中启动 `45`
+- `scripts/47_run_min_aug_ablation_package.sh`：一键完成训练、`ID28C5_TEST` / `EXT25C_TEST` 推理、聚合和最终汇总
+
+家族映射如下：
+
+- `spatial`：水平翻转 + 共享 affine 几何扰动
+- `photometric`：gamma + contrast + brightness + 低频 shade
+- `acquisition`：加性噪声 + 模糊
+- `temporal_sampling`：frame-drop augmentation + start-index jitter
+
+其中 `no_temporal_sampling` 会同时设置 `--aug_disable_groups temporal`
+和 `jitter=0`，也就是一起移除 frame-drop 与采样时的 start jitter。
+
+典型运行方式：
+
+```bash
+GPU_PRESET=l40s \
+BATCH_SIZE=88 VAL_BATCH_SIZE=176 \
+MEM_PROFILE=lowmem PATIENCE=20 \
+bash scripts/47_run_min_aug_ablation_package.sh ./runs/min_aug_ablation_l40s
+```
+
+默认输出：
+
+- `<OUTROOT>/<setting>/best.pt`
+- `<OUTROOT>/<setting>/history.csv`
+- `<OUTROOT>/<setting>/run_config.json`
+- `<OUTROOT>/<setting>/eval_main/ID28C5_TEST/full/{json,points.csv,embryo.csv,summary.json}`
+- `<OUTROOT>/<setting>/eval_main/EXT25C_TEST/full/{json,points.csv,embryo.csv,summary.json}`
+- `<OUTROOT>/min_aug_ablation_summary.csv`
+- `<OUTROOT>/min_aug_ablation_summary.md`
+
+rebuttal 包中使用的代表性配置：
+
+- 模型：`ETF-full`
+- seed：`42`
+- 训练上限：`300` epoch，`patience=20`
+- batch：`batch_size=88`，`val_batch_size=176`
+- `AMP=1`，`mem_profile=lowmem`
+- GPU：单卡 `NVIDIA L40S (46068 MiB)`
+
+本次 rebuttal 中观测到的运行特征：
+
+| 设置 | 最佳验证 epoch | 最佳验证 MAE (h) | 平均每轮耗时 | 总训练耗时 | 峰值显存 |
+|---|---:|---:|---:|---:|---:|
+| `baseline_full` | `122` | `0.923` | `270.7 s` | `10.75 h` | `39.81 GB` |
+| `no_spatial` | `68` | `1.241` | `265.1 s` | `6.55 h` | `39.81 GB` |
+| `no_photometric` | `157` | `0.684` | `267.8 s` | `13.24 h` | `39.81 GB` |
+| `no_acquisition` | `54` | `0.862` | `265.3 s` | `5.53 h` | `39.81 GB` |
+| `no_temporal_sampling` | `133` | `0.816` | `271.0 s` | `11.59 h` | `39.81 GB` |
+
+这组消融的定位是**匹配设置下的单 seed sensitivity analysis**，并不是新的全局超参数搜索。
+
+---
+
 ## ETF CLI 速查
 
 ```bash
@@ -1868,6 +2010,7 @@ python3 src/EmbryoTempoFormer.py infer -h
 | Princeton 外部零样本推理 | `2` 个数据集 × `4` 个模型 × `96` 个胚胎，共 `768` 个 embryo-model job | 总计 `50.5 min`（平均 `3.95 s/job`） | 单卡 `RTX 4060 Laptop (8188 MiB)` 推理 |
 | 低样本微调：`cnn_single + ft12 + frame_tail1` | `batch_size=32`，`val_batch_size=64`，`clip_len=24`，`AMP=1`，`mem_profile=lowmem` | `73.7 s/epoch` | `3.66 GB` |
 | 低样本微调：`full + ft12 + temporal_last1` | `batch_size=16`，`val_batch_size=32`，`clip_len=24`，`AMP=1`，`mem_profile=lowmem` | `135.7 s/epoch` | `5.15 GB` |
+| 最小增强消融（`ETF-full`，单卡 `L40S`） | `batch_size=88`，`val_batch_size=176`，`epochs<=300`，`patience=20`，`AMP=1`，`mem_profile=lowmem` | `265-271 s/epoch`；单设置总耗时 `5.5-13.2 h` | `39.81 GB` |
 
 上述数字对应的代表性硬件为：
 
